@@ -1,0 +1,8 @@
+origen,destino,tiempo_min,distancia_km,capacidad
+A,B,10,3.0,40
+B,C,12,4.0,30
+A,C,20,6.0,50
+A,D,8,2.5,35
+D,E,9,3.2,25
+B,E,7,2.1,45
+C,D,6,1.8,30
