@@ -39,11 +39,11 @@ with st.sidebar:
     destino_nombre = st.selectbox("Destino", sorted(nodos["nombre"]), index=1)
     criterio = st.radio("Optimizar por", ["tiempo_min", "distancia_km"], index=0)
 
-    # 3) Colores
+    # 3) Colores 
     st.markdown("### Colores")
-    col_nodes = st.color_picker("Nodos", "#2E86DE")
-    col_edges = st.color_picker("Aristas", "#8395A7")
-    col_path  = st.color_picker("Ruta seleccionada", "#10AC84")
+    col_nodes = st.color_picker("Nodos", "#FF007F")
+    col_edges = st.color_picker("Aristas", "#007AFF")
+    col_path  = st.color_picker("Ruta seleccionada", "#F2F2F2")
 
     calcular = st.button("Calcular ruta")
 
