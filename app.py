@@ -141,16 +141,16 @@ if calcular:
             st.markdown(f"**Paradas (incluye origen y destino):** {len(path)}")
             st.markdown(f"**Paradas intermedias:** {max(0, len(path) - 2)}")
             st.markdown(f"**Costo total ({criterio}):** {total:.2f}")
-            st.markdown(f"**Costo total ({criterio}):** {total:.2f}")
-                  st.download_button(
+            st.markdown(f"**Costo total ({criterio}):** {total:.2f}"
+            st.download_button
             "📥 Descargar ruta (CSV)",
             data=tramo_df.to_csv(index=False).encode("utf-8"),
             file_name=f"ruta_{o}_{d}_{criterio}.csv",
             mime="text/csv"
-    )
+            st.dataframe(tramo_df, use_container_width=True)
 
-    st.dataframe(tramo_df, 
-use_container_width=True)
+
+
 
         with col2:
             st.pydeck_chart(pdk.Deck(
