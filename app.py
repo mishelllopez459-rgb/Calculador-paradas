@@ -20,7 +20,7 @@ aristas["origen"] = aristas["origen"].astype(str).str.strip()
 aristas["destino"] = aristas["destino"].astype(str).str.strip()
 
 # ---------------- EXTRA: LUGARES NUEVOS (edita lat/lon) ----------------
-# ⚠️ Rellena lat/lon reales. Si quedan en None, ese lugar no se agrega todavía.
+
 extra_nodos = pd.DataFrame([
     {"id":"F","nombre":"Parque Central","lat":None,"lon":None},
     {"id":"G","nombre":"Catedral","lat":None,"lon":None},
