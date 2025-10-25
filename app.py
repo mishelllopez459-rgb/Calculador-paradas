@@ -68,8 +68,8 @@ with st.sidebar:
     destino_nombre = st.selectbox("Destino", sorted(nodos["nombre"]), index=1)
 
     st.markdown("### Colores")
-    col_nodes = st.color_picker("Nodos", "#FF007F")
-    col_path  = st.color_picker("Ruta seleccionada", "#007AFF")
+    col_nodes = st.color_picker("Marcador destino", "#FF007F")
+    col_path  = st.color_picker("Línea de ruta", "#007AFF")
 
     st.markdown("---")
     st.markdown("### Agregar/editar coordenadas del lugar seleccionado")
@@ -112,11 +112,8 @@ def hex_to_rgb(h: str):
     h = h.lstrip("#")
     return [int(h[i:i+2], 16) for i in (0, 2, 4)]
 
-RGB_NODES = hex_to_rgb(col_nodes)   # para destino
-RGB_PATH  = hex_to_rgb(col_path)
-
-# color apagado para el origen (gris claro)
-RGB_ORIGEN = [180, 180, 180]
+RGB_DESTINO = hex_to_rgb(col_nodes)  # este color se usa SOLO para el destino
+RGB_PATH    = hex_to_rgb(col_path)
 
 def haversine_km(a_lat, a_lon, b_lat, b_lon):
     R = 6371.0
@@ -139,7 +136,7 @@ if calcular:
     fila_o = nodos.loc[nodos["nombre"] == origen_nombre].iloc[0]
     fila_d = nodos.loc[nodos["nombre"] == destino_nombre].iloc[0]
 
-    # validar coords
+    # validar coords de ambos
     if (
         pd.isna(fila_o["lat"]) or pd.isna(fila_o["lon"]) or
         pd.isna(fila_d["lat"]) or pd.isna(fila_d["lon"])
@@ -154,7 +151,7 @@ if calcular:
             zoom=DEFAULT_ZOOM
         )
 
-        # Mapa vacío si no hay coords válidas
+        # mapa vacío si hay error
         st.pydeck_chart(
             pdk.Deck(layers=[], initial_view_state=view_state),
             use_container_width=True
@@ -169,62 +166,52 @@ if calcular:
         vel_kmh = 30.0  # suposición bus
         t_min = (dist_km / vel_kmh) * 60.0
 
-        # DataFrame tramo directo (origen y destino)
+        # DataFrame con solo ORIGEN->DESTINO
         tramo_df = pd.DataFrame([
-            {"tipo": "origen",   "nombre": origen_nombre,  "lat": fila_o["lat"], "lon": fila_o["lon"]},
-            {"tipo": "destino",  "nombre": destino_nombre, "lat": fila_d["lat"], "lon": fila_d["lon"]},
+            {"nombre": origen_nombre,  "lat": fila_o["lat"], "lon": fila_o["lon"]},
+            {"nombre": destino_nombre, "lat": fila_d["lat"], "lon": fila_d["lon"]},
         ])
 
-        # DF separado para origen y destino
-        df_origen = tramo_df[tramo_df["tipo"] == "origen"].rename(columns={"lon": "lng"})
-        df_dest   = tramo_df[tramo_df["tipo"] == "destino"].rename(columns={"lon": "lng"})
+        # --- CAPAS QUE SE VAN A DIBUJAR ---
 
-        # capa origen (punto pequeño gris)
-        origen_layer = pdk.Layer(
-            "ScatterplotLayer",
-            data=df_origen,
-            get_position="[lng, lat]",
-            get_radius=40,              # más pequeño
-            radius_min_pixels=3,
-            get_fill_color=RGB_ORIGEN,  # gris
-            get_line_color=[30, 30, 30],
-            line_width_min_pixels=1,
-            pickable=True,
-        )
-
-        # capa destino (punto más grande y color fuerte)
-        destino_layer = pdk.Layer(
-            "ScatterplotLayer",
-            data=df_dest,
-            get_position="[lng, lat]",
-            get_radius=90,              # más grande
-            radius_min_pixels=4,
-            get_fill_color=RGB_NODES,   # color elegido en sidebar
-            get_line_color=[0, 0, 0],
-            line_width_min_pixels=1,
-            pickable=True,
-        )
-
-        # capa ruta (arista entre origen y destino)
+        # 1) Línea desde origen hasta destino
         path_layer = pdk.Layer(
             "PathLayer",
             data=[{"path": tramo_df[["lon", "lat"]].values.tolist()}],
             get_path="path",
             get_width=6,
             width_scale=8,
-            get_color=RGB_PATH,
+            get_color=RGB_PATH,    # color de la línea
             pickable=False,
         )
 
-        # centramos vista en el promedio entre origen y destino
-        center_lat = tramo_df["lat"].mean()
-        center_lon = tramo_df["lon"].mean()
+        # 2) Marcador SOLO en el destino (lo importante)
+        destino_only_df = pd.DataFrame([{
+            "nombre": destino_nombre,
+            "lat": fila_d["lat"],
+            "lng": fila_d["lon"]
+        }])
+
+        destino_layer = pdk.Layer(
+            "ScatterplotLayer",
+            data=destino_only_df,
+            get_position="[lng, lat]",
+            get_radius=100,               # grande para que se note
+            radius_min_pixels=5,
+            get_fill_color=RGB_DESTINO,   # color elegido en sidebar
+            get_line_color=[0, 0, 0],
+            line_width_min_pixels=1,
+            pickable=True,
+        )
+
+        # centramos el mapa en el DESTINO (a dónde voy)
         view_state = pdk.ViewState(
-            latitude=center_lat,
-            longitude=center_lon,
+            latitude=fila_d["lat"],
+            longitude=fila_d["lon"],
             zoom=DEFAULT_ZOOM
         )
 
+        # ----------- PANEL IZQUIERDO (info) -----------
         with col1:
             st.subheader("Resumen")
             st.markdown(f"**Origen:** {origen_nombre}")
@@ -234,17 +221,18 @@ if calcular:
 
             st.download_button(
                 "📥 Descargar puntos (CSV)",
-                data=tramo_df[["nombre","lat","lon"]].to_csv(index=False).encode("utf-8"),
+                data=tramo_df.to_csv(index=False).encode("utf-8"),
                 file_name="puntos_directo.csv",
                 mime="text/csv"
             )
 
-            st.dataframe(tramo_df[["nombre","lat","lon"]], use_container_width=True)
+            st.dataframe(tramo_df, use_container_width=True)
 
+        # ----------- PANEL DERECHO (mapa) -----------
         with col2:
             st.pydeck_chart(
                 pdk.Deck(
-                    layers=[path_layer, origen_layer, destino_layer],
+                    layers=[path_layer, destino_layer],
                     initial_view_state=view_state,
                     tooltip={"text": "{nombre}\nLat: {lat}\nLon: {lng}"}
                 ),
@@ -252,9 +240,12 @@ if calcular:
             )
 
 else:
-    # Antes de calcular: mapa vacío (sin nodos)
+    # Antes de calcular: mapa completamente vacío
     st.info(
-        "Selecciona origen y destino en la barra lateral, guarda coordenadas si hace falta y presiona 'Calcular ruta'."
+        "1. Elegí Origen y Destino\n"
+        "2. Asegurate que ambos tengan Lat/Lon\n"
+        "3. Presioná 'Calcular ruta'\n\n"
+        "El mapa solo va a marcar el destino y la línea hasta allí."
     )
 
     view_state = pdk.ViewState(
