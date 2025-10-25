@@ -112,8 +112,11 @@ def hex_to_rgb(h: str):
     h = h.lstrip("#")
     return [int(h[i:i+2], 16) for i in (0, 2, 4)]
 
-RGB_NODES = hex_to_rgb(col_nodes)
+RGB_NODES = hex_to_rgb(col_nodes)   # para destino
 RGB_PATH  = hex_to_rgb(col_path)
+
+# color apagado para el origen (gris claro)
+RGB_ORIGEN = [180, 180, 180]
 
 def haversine_km(a_lat, a_lon, b_lat, b_lon):
     R = 6371.0
@@ -126,13 +129,10 @@ def haversine_km(a_lat, a_lon, b_lat, b_lon):
 # ---------------- MAPA / LAYOUT ----------------
 col1, col2 = st.columns([1, 2])
 
-# valores por defecto del mapa (sin marcar ruta todavía)
+# valores por defecto del mapa (antes de calcular)
 DEFAULT_LAT = 14.965
 DEFAULT_LON = -91.79
 DEFAULT_ZOOM = 13
-
-# Ahora ya NO creamos la capa de todos los nodos aquí.
-# En lugar de eso vamos a construir dinámicamente según si se calculó ruta o no.
 
 if calcular:
     # agarrar filas de origen y destino
@@ -144,48 +144,63 @@ if calcular:
         pd.isna(fila_o["lat"]) or pd.isna(fila_o["lon"]) or
         pd.isna(fila_d["lat"]) or pd.isna(fila_d["lon"])
     ):
-        # coords incompletas => no mostramos puntos
         st.error(
             "Faltan coordenadas en uno o ambos lugares. Completa lat/lon en la barra lateral y vuelve a calcular."
         )
 
-        # centro por defecto
-        view_state = pdk.ViewState(latitude=DEFAULT_LAT,
-                                   longitude=DEFAULT_LON,
-                                   zoom=DEFAULT_ZOOM)
+        view_state = pdk.ViewState(
+            latitude=DEFAULT_LAT,
+            longitude=DEFAULT_LON,
+            zoom=DEFAULT_ZOOM
+        )
 
-        # Mapa SIN nodos SIN ruta
-        deck_layers = []
-
+        # Mapa vacío si no hay coords válidas
         st.pydeck_chart(
-            pdk.Deck(layers=deck_layers, initial_view_state=view_state),
+            pdk.Deck(layers=[], initial_view_state=view_state),
             use_container_width=True
         )
 
     else:
-        # Tenemos coords => construimos ruta directa y mostramos SOLO esos nodos
+        # Distancia y tiempo aprox
         dist_km = haversine_km(
             fila_o["lat"], fila_o["lon"],
             fila_d["lat"], fila_d["lon"]
         )
-        vel_kmh = 30.0  # supuesta velocidad bus
+        vel_kmh = 30.0  # suposición bus
         t_min = (dist_km / vel_kmh) * 60.0
 
+        # DataFrame tramo directo (origen y destino)
         tramo_df = pd.DataFrame([
-            {"nombre": origen_nombre, "lat": fila_o["lat"], "lon": fila_o["lon"]},
-            {"nombre": destino_nombre, "lat": fila_d["lat"], "lon": fila_d["lon"]},
+            {"tipo": "origen",   "nombre": origen_nombre,  "lat": fila_o["lat"], "lon": fila_o["lon"]},
+            {"tipo": "destino",  "nombre": destino_nombre, "lat": fila_d["lat"], "lon": fila_d["lon"]},
         ])
 
-        # capa nodos SOLO origen y destino
-        tramo_plot = tramo_df.rename(columns={"lon": "lng"})
-        nodes_layer = pdk.Layer(
+        # DF separado para origen y destino
+        df_origen = tramo_df[tramo_df["tipo"] == "origen"].rename(columns={"lon": "lng"})
+        df_dest   = tramo_df[tramo_df["tipo"] == "destino"].rename(columns={"lon": "lng"})
+
+        # capa origen (punto pequeño gris)
+        origen_layer = pdk.Layer(
             "ScatterplotLayer",
-            data=tramo_plot,
+            data=df_origen,
             get_position="[lng, lat]",
-            get_radius=65,
+            get_radius=40,              # más pequeño
             radius_min_pixels=3,
-            get_fill_color=RGB_NODES,
+            get_fill_color=RGB_ORIGEN,  # gris
             get_line_color=[30, 30, 30],
+            line_width_min_pixels=1,
+            pickable=True,
+        )
+
+        # capa destino (punto más grande y color fuerte)
+        destino_layer = pdk.Layer(
+            "ScatterplotLayer",
+            data=df_dest,
+            get_position="[lng, lat]",
+            get_radius=90,              # más grande
+            radius_min_pixels=4,
+            get_fill_color=RGB_NODES,   # color elegido en sidebar
+            get_line_color=[0, 0, 0],
             line_width_min_pixels=1,
             pickable=True,
         )
@@ -201,7 +216,7 @@ if calcular:
             pickable=False,
         )
 
-        # centramos vista en el promedio de origen/destino
+        # centramos vista en el promedio entre origen y destino
         center_lat = tramo_df["lat"].mean()
         center_lon = tramo_df["lon"].mean()
         view_state = pdk.ViewState(
@@ -219,30 +234,27 @@ if calcular:
 
             st.download_button(
                 "📥 Descargar puntos (CSV)",
-                data=tramo_df.to_csv(index=False).encode("utf-8"),
+                data=tramo_df[["nombre","lat","lon"]].to_csv(index=False).encode("utf-8"),
                 file_name="puntos_directo.csv",
                 mime="text/csv"
             )
 
-            st.dataframe(tramo_df, use_container_width=True)
+            st.dataframe(tramo_df[["nombre","lat","lon"]], use_container_width=True)
 
         with col2:
             st.pydeck_chart(
                 pdk.Deck(
-                    layers=[nodes_layer, path_layer],
-                    initial_view_state=view_state
+                    layers=[path_layer, origen_layer, destino_layer],
+                    initial_view_state=view_state,
+                    tooltip={"text": "{nombre}\nLat: {lat}\nLon: {lng}"}
                 ),
                 use_container_width=True
             )
 
 else:
-    # todavía NO se ha calculado ruta:
-    #  - NO mostramos nodos
-    #  - NO mostramos aristas
-    # solo el mapa vacío centrado en default y un mensajito
+    # Antes de calcular: mapa vacío (sin nodos)
     st.info(
-        "Selecciona origen y destino en la barra lateral. "
-        "Guarda coordenadas si hace falta y presiona 'Calcular ruta'."
+        "Selecciona origen y destino en la barra lateral, guarda coordenadas si hace falta y presiona 'Calcular ruta'."
     )
 
     view_state = pdk.ViewState(
@@ -251,12 +263,8 @@ else:
         zoom=DEFAULT_ZOOM
     )
 
-    # sin capas
-    deck_layers = []
-
     st.pydeck_chart(
-        pdk.Deck(layers=deck_layers, initial_view_state=view_state),
+        pdk.Deck(layers=[], initial_view_state=view_state),
         use_container_width=True
     )
-
 
