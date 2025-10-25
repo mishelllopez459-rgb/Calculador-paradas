@@ -60,6 +60,16 @@ if "nodos_mem" not in st.session_state:
 
 nodos = st.session_state.nodos_mem
 
+# --- GRAFO EN MEMORIA (persistente durante la sesión del usuario) ---
+# graph_points = todos los puntos que YA se usaron en rutas calculadas
+# columnas: nombre, lat, lon
+if "graph_points" not in st.session_state:
+    st.session_state.graph_points = pd.DataFrame(columns=["nombre", "lat", "lon"])
+
+# graph_edges = todas las aristas (cada una es {"path": [[lon_o, lat_o],[lon_d, lat_d]]})
+if "graph_edges" not in st.session_state:
+    st.session_state.graph_edges = []
+
 # ---------------- SIDEBAR ----------------
 with st.sidebar:
     st.header("Parámetros")
@@ -68,52 +78,20 @@ with st.sidebar:
     destino_nombre = st.selectbox("Destino", sorted(nodos["nombre"]), index=1)
 
     st.markdown("### Colores")
-    col_nodes = st.color_picker("Marcador destino", "#FF007F")
-    col_path  = st.color_picker("Línea de ruta", "#007AFF")
+    col_nodes = st.color_picker("Nodos", "#FF007F")
+    col_path  = st.color_picker("Ruta seleccionada", "#007AFF")
 
-    st.markdown("---")
-    st.markdown("### Agregar/editar coordenadas del lugar seleccionado")
-
-    def editor_de_coords(etiqueta, nombre_sel):
-        fila = nodos.loc[nodos["nombre"] == nombre_sel].iloc[0]
-        col1, col2 = st.columns(2)
-        with col1:
-            lat_txt = st.text_input(
-                f"Lat ({etiqueta})",
-                value="" if pd.isna(fila["lat"]) else str(fila["lat"]),
-                key=f"lat_{etiqueta}"
-            )
-        with col2:
-            lon_txt = st.text_input(
-                f"Lon ({etiqueta})",
-                value="" if pd.isna(fila["lon"]) else str(fila["lon"]),
-                key=f"lon_{etiqueta}"
-            )
-        if st.button(f"Guardar coords de {etiqueta}"):
-            try:
-                lat = float(str(lat_txt).replace(",", "."))
-                lon = float(str(lon_txt).replace(",", "."))
-                st.session_state.nodos_mem.loc[
-                    nodos["nombre"] == nombre_sel, ["lat", "lon"]
-                ] = [lat, lon]
-                st.success(
-                    f"Coordenadas guardadas para {nombre_sel}: ({lat}, {lon})"
-                )
-            except ValueError:
-                st.error("Lat/Lon inválidos. Usa números (ej. 14.9712 y -91.7815)")
-
-    editor_de_coords("Origen", origen_nombre)
-    editor_de_coords("Destino", destino_nombre)
+    # >>> IMPORTANTE: ya NO hay editor_de_coords aquí. Lo quité. <<<
 
     calcular = st.button("Calcular ruta")
 
-# ---------------- UTILIDADES ----------------
+# Colores (RGB)
 def hex_to_rgb(h: str):
     h = h.lstrip("#")
     return [int(h[i:i+2], 16) for i in (0, 2, 4)]
 
-RGB_DESTINO = hex_to_rgb(col_nodes)  # este color se usa SOLO para el destino
-RGB_PATH    = hex_to_rgb(col_path)
+RGB_NODES = hex_to_rgb(col_nodes)
+RGB_PATH  = hex_to_rgb(col_path)
 
 def haversine_km(a_lat, a_lon, b_lat, b_lon):
     R = 6371.0
@@ -123,139 +101,149 @@ def haversine_km(a_lat, a_lon, b_lat, b_lon):
     h = math.sin(dlat/2)**2 + math.cos(lat1)*math.cos(lat2)*math.sin(dlon/2)**2
     return 2 * R * math.asin(math.sqrt(h))
 
-# ---------------- MAPA / LAYOUT ----------------
-col1, col2 = st.columns([1, 2])
-
-# valores por defecto del mapa (antes de calcular)
-DEFAULT_LAT = 14.965
-DEFAULT_LON = -91.79
-DEFAULT_ZOOM = 13
+# ---------------- LÓGICA AL CALCULAR RUTA ----------------
+# Vamos a guardar info de la ÚLTIMA ruta calculada para mostrar resumen.
+last_tramo_df = None
+last_dist_km = None
+last_t_min = None
+last_origen = None
+last_destino = None
+update_ok = False
 
 if calcular:
-    # agarrar filas de origen y destino
     fila_o = nodos.loc[nodos["nombre"] == origen_nombre].iloc[0]
     fila_d = nodos.loc[nodos["nombre"] == destino_nombre].iloc[0]
 
-    # validar coords de ambos
+    # Verificamos que ambos tengan coordenadas en nodos.csv
     if (
         pd.isna(fila_o["lat"]) or pd.isna(fila_o["lon"]) or
         pd.isna(fila_d["lat"]) or pd.isna(fila_d["lon"])
     ):
-        st.error(
-            "Faltan coordenadas en uno o ambos lugares. Completa lat/lon en la barra lateral y vuelve a calcular."
-        )
-
-        view_state = pdk.ViewState(
-            latitude=DEFAULT_LAT,
-            longitude=DEFAULT_LON,
-            zoom=DEFAULT_ZOOM
-        )
-
-        # mapa vacío si hay error
-        st.pydeck_chart(
-            pdk.Deck(layers=[], initial_view_state=view_state),
-            use_container_width=True
-        )
-
+        st.error("Ese origen o destino no tiene coordenadas en nodos.csv. Agregalas al CSV y vuelve a intentar.")
     else:
-        # Distancia y tiempo aprox
-        dist_km = haversine_km(
-            fila_o["lat"], fila_o["lon"],
-            fila_d["lat"], fila_d["lon"]
-        )
-        vel_kmh = 30.0  # suposición bus
-        t_min = (dist_km / vel_kmh) * 60.0
+        # Distancia aprox + tiempo aprox
+        last_dist_km = haversine_km(fila_o["lat"], fila_o["lon"], fila_d["lat"], fila_d["lon"])
+        vel_kmh = 30.0  # supuesta
+        last_t_min = (last_dist_km / vel_kmh) * 60.0
 
-        # DataFrame con solo ORIGEN->DESTINO
-        tramo_df = pd.DataFrame([
+        last_origen = origen_nombre
+        last_destino = destino_nombre
+
+        # DataFrame de la ruta actual solo (para descargar/tabla)
+        last_tramo_df = pd.DataFrame([
             {"nombre": origen_nombre,  "lat": fila_o["lat"], "lon": fila_o["lon"]},
             {"nombre": destino_nombre, "lat": fila_d["lat"], "lon": fila_d["lon"]},
         ])
 
-        # --- CAPAS QUE SE VAN A DIBUJAR ---
+        # -------- ACTUALIZAR EL GRAFO GLOBAL EN SESSION_STATE --------
+        # Agregar origen y destino a graph_points (sin duplicar por nombre)
+        nuevos_puntos = pd.DataFrame([
+            {"nombre": origen_nombre,  "lat": fila_o["lat"], "lon": fila_o["lon"]},
+            {"nombre": destino_nombre, "lat": fila_d["lat"], "lon": fila_d["lon"]},
+        ])
 
-        # 1) Línea desde origen hasta destino
-        path_layer = pdk.Layer(
-            "PathLayer",
-            data=[{"path": tramo_df[["lon", "lat"]].values.tolist()}],
-            get_path="path",
-            get_width=6,
-            width_scale=8,
-            get_color=RGB_PATH,    # color de la línea
-            pickable=False,
+        st.session_state.graph_points = (
+            pd.concat([st.session_state.graph_points, nuevos_puntos], ignore_index=True)
+            .drop_duplicates(subset=["nombre"], keep="last")
         )
 
-        # 2) Marcador SOLO en el destino (lo importante)
-        destino_only_df = pd.DataFrame([{
-            "nombre": destino_nombre,
-            "lat": fila_d["lat"],
-            "lng": fila_d["lon"]
-        }])
+        # Agregar la arista origen->destino a graph_edges
+        st.session_state.graph_edges.append({
+            "path": [
+                [fila_o["lon"], fila_o["lat"]],
+                [fila_d["lon"], fila_d["lat"]],
+            ]
+        })
 
-        destino_layer = pdk.Layer(
-            "ScatterplotLayer",
-            data=destino_only_df,
-            get_position="[lng, lat]",
-            get_radius=100,               # grande para que se note
-            radius_min_pixels=5,
-            get_fill_color=RGB_DESTINO,   # color elegido en sidebar
-            get_line_color=[0, 0, 0],
-            line_width_min_pixels=1,
-            pickable=True,
+        update_ok = True  # sí se pudo calcular una ruta válida
+
+# ---------------- MAPA (USANDO TODO LO QUE YA SE HA IDO GUARDANDO) ----------------
+col1, col2 = st.columns([1, 2])
+
+# Vamos a dibujar:
+# - TODOS los nodos que ya se usaron en rutas anteriores (graph_points)
+# - TODAS las aristas acumuladas (graph_edges)
+
+if len(st.session_state.graph_points) > 0:
+    puntos_plot = st.session_state.graph_points.rename(columns={"lon": "lng"}).copy()
+
+    # Capa de nodos acumulados
+    nodes_layer = pdk.Layer(
+        "ScatterplotLayer",
+        data=puntos_plot,
+        get_position="[lng, lat]",
+        get_radius=90,
+        radius_min_pixels=4,
+        get_fill_color=RGB_NODES,
+        get_line_color=[0, 0, 0],
+        line_width_min_pixels=1,
+        pickable=True,
+    )
+
+    # Capa de aristas acumuladas
+    edges_layer = pdk.Layer(
+        "PathLayer",
+        data=st.session_state.graph_edges,
+        get_path="path",
+        get_width=6,
+        width_scale=8,
+        get_color=RGB_PATH,
+        pickable=False,
+    )
+
+    # centramos vista en el promedio de todos los puntos visitados hasta ahora
+    center_lat = float(puntos_plot["lat"].mean())
+    center_lon = float(puntos_plot["lng"].mean())
+    view_state = pdk.ViewState(latitude=center_lat, longitude=center_lon, zoom=13)
+
+    with col2:
+        st.pydeck_chart(
+            pdk.Deck(
+                layers=[edges_layer, nodes_layer],
+                initial_view_state=view_state,
+                tooltip={"text": "{nombre}\nLat: {lat}\nLon: {lng}"}
+            ),
+            use_container_width=True
         )
-
-        # centramos el mapa en el DESTINO (a dónde voy)
-        view_state = pdk.ViewState(
-            latitude=fila_d["lat"],
-            longitude=fila_d["lon"],
-            zoom=DEFAULT_ZOOM
-        )
-
-        # ----------- PANEL IZQUIERDO (info) -----------
-        with col1:
-            st.subheader("Resumen")
-            st.markdown(f"**Origen:** {origen_nombre}")
-            st.markdown(f"**Destino:** {destino_nombre}")
-            st.markdown(f"**Distancia directa aprox.:** {dist_km:.2f} km")
-            st.markdown(f"**Tiempo aprox. (30 km/h):** {t_min:.1f} min")
-
-            st.download_button(
-                "📥 Descargar puntos (CSV)",
-                data=tramo_df.to_csv(index=False).encode("utf-8"),
-                file_name="puntos_directo.csv",
-                mime="text/csv"
-            )
-
-            st.dataframe(tramo_df, use_container_width=True)
-
-        # ----------- PANEL DERECHO (mapa) -----------
-        with col2:
-            st.pydeck_chart(
-                pdk.Deck(
-                    layers=[path_layer, destino_layer],
-                    initial_view_state=view_state,
-                    tooltip={"text": "{nombre}\nLat: {lat}\nLon: {lng}"}
-                ),
-                use_container_width=True
-            )
 
 else:
-    # Antes de calcular: mapa completamente vacío
-    st.info(
-        "1. Elegí Origen y Destino\n"
-        "2. Asegurate que ambos tengan Lat/Lon\n"
-        "3. Presioná 'Calcular ruta'\n\n"
-        "El mapa solo va a marcar el destino y la línea hasta allí."
-    )
+    # Si todavía no se calculó ninguna ruta válida, mostramos mapa vacío
+    DEFAULT_LAT = 14.965
+    DEFAULT_LON = -91.79
+    view_state = pdk.ViewState(latitude=DEFAULT_LAT, longitude=DEFAULT_LON, zoom=13)
 
-    view_state = pdk.ViewState(
-        latitude=DEFAULT_LAT,
-        longitude=DEFAULT_LON,
-        zoom=DEFAULT_ZOOM
-    )
+    with col2:
+        st.pydeck_chart(
+            pdk.Deck(
+                layers=[],  # sin nodos, sin aristas todavía
+                initial_view_state=view_state
+            ),
+            use_container_width=True
+        )
 
-    st.pydeck_chart(
-        pdk.Deck(layers=[], initial_view_state=view_state),
-        use_container_width=True
-    )
+# ---------------- PANEL IZQUIERDO (RESUMEN ÚLTIMA RUTA) ----------------
+with col1:
+    if update_ok and last_tramo_df is not None:
+        st.subheader("Resumen")
+        st.markdown(f"**Origen:** {last_origen}")
+        st.markdown(f"**Destino:** {last_destino}")
+        st.markdown(f"**Distancia directa aprox.:** {last_dist_km:.2f} km")
+        st.markdown(f"**Tiempo aprox. (30 km/h):** {last_t_min:.1f} min")
+
+        st.download_button(
+            "📥 Descargar puntos (CSV)",
+            data=last_tramo_df.to_csv(index=False).encode("utf-8"),
+            file_name="puntos_directo.csv",
+            mime="text/csv"
+        )
+        st.dataframe(last_tramo_df, use_container_width=True)
+    else:
+        st.info(
+            "1. Elegí Origen y Destino en la barra lateral.\n"
+            "2. Presioná 'Calcular ruta'.\n\n"
+            "Cada vez que calcules una ruta:\n"
+            "- Se agrega automáticamente el nodo de cada lugar al mapa.\n"
+            "- Se dibuja la arista (línea) entre ellos.\n"
+            "El mapa va guardando todo lo que ya hiciste en esta sesión."
+        )
 
