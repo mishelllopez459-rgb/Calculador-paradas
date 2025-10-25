@@ -70,8 +70,10 @@ nodos = st.session_state.nodos_mem
 # ---------------- ESTADO DEL GRAFO EN SESIÓN ----------------
 if "graph_points" not in st.session_state:
     st.session_state.graph_points = pd.DataFrame(columns=["nombre", "lat", "lon"])
+
 if "graph_edges" not in st.session_state:
     st.session_state.graph_edges = []
+
 # Mantener firma de la ruta para resetear al cambiar
 if "last_route_sig" not in st.session_state:
     st.session_state.last_route_sig = None
@@ -90,6 +92,7 @@ def haversine_km(a_lat, a_lon, b_lat, b_lon):
     return 2 * R * math.asin(math.sqrt(h))
 
 def pseudo_offset(nombre: str):
+    # genera coords determinísticas cerca del centro BASE_LAT/LON
     s_val = 0
     for i, ch in enumerate(nombre):
         s_val += (i + 1) * ord(ch)
@@ -101,9 +104,14 @@ def asegurar_coords_en_mem(nombre_lugar: str):
     df = st.session_state.nodos_mem
     idx = df.index[df["nombre"] == nombre_lugar]
     if len(idx) == 0:
+        # no existe: crearlo con coords pseudo
         lat_new, lon_new = pseudo_offset(nombre_lugar)
-        nuevo = {"id": f"AUTO_{nombre_lugar}", "nombre": nombre_lugar,
-                 "lat": lat_new, "lon": lon_new}
+        nuevo = {
+            "id": f"AUTO_{nombre_lugar}",
+            "nombre": nombre_lugar,
+            "lat": lat_new,
+            "lon": lon_new
+        }
         st.session_state.nodos_mem = pd.concat(
             [st.session_state.nodos_mem, pd.DataFrame([nuevo])],
             ignore_index=True
@@ -114,6 +122,7 @@ def asegurar_coords_en_mem(nombre_lugar: str):
         lat_val = st.session_state.nodos_mem.at[i, "lat"]
         lon_val = st.session_state.nodos_mem.at[i, "lon"]
         if pd.isna(lat_val) or pd.isna(lon_val):
+            # existe pero sin coords: asignar pseudo
             lat_new, lon_new = pseudo_offset(nombre_lugar)
             st.session_state.nodos_mem.at[i, "lat"] = lat_new
             st.session_state.nodos_mem.at[i, "lon"] = lon_new
@@ -124,9 +133,19 @@ def asegurar_coords_en_mem(nombre_lugar: str):
 # ---------------- SIDEBAR ----------------
 with st.sidebar:
     st.header("Parámetros")
+
     # claves para detectar cambios
-    origen_nombre  = st.selectbox("Origen",  sorted(nodos["nombre"].astype(str)), key="sel_origen")
-    destino_nombre = st.selectbox("Destino", sorted(nodos["nombre"].astype(str)), index=1, key="sel_destino")
+    origen_nombre  = st.selectbox(
+        "Origen",
+        sorted(nodos["nombre"].astype(str)),
+        key="sel_origen"
+    )
+    destino_nombre = st.selectbox(
+        "Destino",
+        sorted(nodos["nombre"].astype(str)),
+        index=1,
+        key="sel_destino"
+    )
 
     st.markdown("### Colores")
     col_nodes = st.color_picker("Nodos", "#FF007F")
@@ -156,9 +175,11 @@ last_destino = None
 update_ok = False
 
 if calcular:
+    # Coordenadas (se generan si faltan)
     o_lat, o_lon = asegurar_coords_en_mem(origen_nombre)
     d_lat, d_lon = asegurar_coords_en_mem(destino_nombre)
 
+    # Distancia directa y tiempo estimado
     last_dist_km = haversine_km(o_lat, o_lon, d_lat, d_lon)
     vel_kmh = 30.0
     last_t_min = (last_dist_km / vel_kmh) * 60.0
@@ -166,12 +187,13 @@ if calcular:
     last_origen = origen_nombre
     last_destino = destino_nombre
 
+    # DataFrame de este tramo
     last_tramo_df = pd.DataFrame([
         {"nombre": origen_nombre,  "lat": o_lat, "lon": o_lon},
         {"nombre": destino_nombre, "lat": d_lat, "lon": d_lon},
     ])
 
-    # Agregar nodos (sin duplicar) y arista
+    # Agregar nodos (sin duplicar)
     nuevos_puntos = pd.DataFrame([
         {"nombre": origen_nombre,  "lat": o_lat, "lon": o_lon},
         {"nombre": destino_nombre, "lat": d_lat, "lon": d_lon},
@@ -180,7 +202,15 @@ if calcular:
         pd.concat([st.session_state.graph_points, nuevos_puntos], ignore_index=True)
         .drop_duplicates(subset=["nombre"], keep="last")
     )
-    st.session_state.graph_edges.append({"path": [[o_lon, o_lat], [d_lon, d_lat]]})
+
+    # Agregar la arista, incluyendo distancia y tiempo formateados
+    st.session_state.graph_edges.append({
+        "path": [[o_lon, o_lat], [d_lon, d_lat]],
+        "origen": origen_nombre,
+        "destino": destino_nombre,
+        "dist_km": f"{last_dist_km:.2f}",
+        "t_min": f"{last_t_min:.1f}"
+    })
 
     update_ok = True
 
@@ -209,27 +239,54 @@ if len(st.session_state.graph_points) > 0:
         get_width=6,
         width_scale=8,
         get_color=RGB_PATH,
-        pickable=False,
+        pickable=True,  # <- ahora sí es seleccionable para tooltip
     )
 
+    # centro del mapa basado en los puntos actuales
     center_lat = float(puntos_plot["lat"].mean())
     center_lon = float(puntos_plot["lng"].mean())
 
-    view_state = pdk.ViewState(latitude=center_lat, longitude=center_lon, zoom=14, pitch=0)
+    view_state = pdk.ViewState(
+        latitude=center_lat,
+        longitude=center_lon,
+        zoom=14,
+        pitch=0
+    )
 
     with col2:
         st.pydeck_chart(
             pdk.Deck(
                 layers=[edges_layer, nodes_layer],
                 initial_view_state=view_state,
-                tooltip={"text": "{nombre}\nLat: {lat}\nLon: {lng}"}
+                tooltip={
+                    "text": (
+                        "{nombre}\n"
+                        "Lat: {lat}\n"
+                        "Lon: {lng}\n"
+                        "Ruta: {origen} → {destino}\n"
+                        "Dist: {dist_km} km\n"
+                        "Tiempo: {t_min} min"
+                    )
+                }
             ),
             use_container_width=True
         )
 else:
-    view_state = pdk.ViewState(latitude=BASE_LAT, longitude=BASE_LON, zoom=14, pitch=0)
+    # mapa vacío inicial
+    view_state = pdk.ViewState(
+        latitude=BASE_LAT,
+        longitude=BASE_LON,
+        zoom=14,
+        pitch=0
+    )
     with col2:
-        st.pydeck_chart(pdk.Deck(layers=[], initial_view_state=view_state), use_container_width=True)
+        st.pydeck_chart(
+            pdk.Deck(
+                layers=[],
+                initial_view_state=view_state
+            ),
+            use_container_width=True
+        )
 
 # ---------------- PANEL IZQUIERDO ----------------
 with col1:
@@ -246,6 +303,12 @@ with col1:
             file_name="puntos_directo.csv",
             mime="text/csv"
         )
+
         st.dataframe(last_tramo_df, use_container_width=True)
     else:
-        st.info("Cambia Origen/Destino y se limpia el mapa; presiona 'Calcular ruta' para ver la nueva arista y nodos.")
+        st.info(
+            "Cambia Origen/Destino y se limpia el mapa; "
+            "presiona 'Calcular ruta' para ver la nueva arista, nodos, "
+            "distancia y tiempo estimado."
+        )
+
