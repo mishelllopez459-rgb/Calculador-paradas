@@ -62,25 +62,25 @@ def asegurar_lugares(df: pd.DataFrame, nombres: list) -> pd.DataFrame:
 
 nodos = asegurar_lugares(nodos, LUGARES_NUEVOS)
 
-# Guardar en memoria de sesión
+# Guardar en memoria de sesión (nodos base editables en runtime)
 if "nodos_mem" not in st.session_state:
     st.session_state.nodos_mem = nodos.copy()
 nodos = st.session_state.nodos_mem
 
 # ---------------- ESTADO DEL GRAFO EN SESIÓN ----------------
-# Nodos acumulados de todas las rutas calculadas
+# nodos acumulados (toda la red fija que ya se construyó)
 if "graph_points" not in st.session_state:
     st.session_state.graph_points = pd.DataFrame(columns=["nombre", "lat", "lon"])
 
-# Aristas acumuladas permanentes
+# aristas acumuladas fijas (todas las rutas históricas)
 if "graph_edges" not in st.session_state:
     st.session_state.graph_edges = []
 
-# Última ruta calculada (para dibujarla encima con color distinto)
+# arista resaltada (última ruta calculada, se dibuja encima con otro color)
 if "highlight_edge" not in st.session_state:
     st.session_state.highlight_edge = []
 
-# ---------------- AUX ----------------
+# ---------------- FUNCIONES AUX ----------------
 def hex_to_rgb(h: str):
     h = h.lstrip("#")
     return [int(h[i:i+2], 16) for i in (0, 2, 4)]
@@ -104,11 +104,12 @@ def pseudo_offset(nombre: str):
 
 def asegurar_coords_en_mem(nombre_lugar: str):
     """
-    Devuelve lat/lon para el lugar. Si no existen, las inventa,
-    las guarda en nodos_mem, y devuelve eso.
+    Devuelve (lat, lon) para el lugar.
+    Si no existen, las genera, las guarda en nodos_mem y luego las usa.
     """
     df = st.session_state.nodos_mem
     idx = df.index[df["nombre"] == nombre_lugar]
+
     if len(idx) == 0:
         # no existe: crearlo con coords pseudo
         lat_new, lon_new = pseudo_offset(nombre_lugar)
@@ -127,6 +128,7 @@ def asegurar_coords_en_mem(nombre_lugar: str):
         i = idx[0]
         lat_val = st.session_state.nodos_mem.at[i, "lat"]
         lon_val = st.session_state.nodos_mem.at[i, "lon"]
+
         if pd.isna(lat_val) or pd.isna(lon_val):
             # existe pero sin coords: asignar pseudo
             lat_new, lon_new = pseudo_offset(nombre_lugar)
@@ -136,7 +138,7 @@ def asegurar_coords_en_mem(nombre_lugar: str):
         else:
             return float(lat_val), float(lon_val)
 
-# ---------------- SIDEBAR ----------------
+# ---------------- SIDEBAR (CONTROLES) ----------------
 with st.sidebar:
     st.header("Parámetros")
 
@@ -153,9 +155,9 @@ with st.sidebar:
     )
 
     st.markdown("### Colores")
-    col_nodes = st.color_picker("Nodos (fijos)", "#FF007F")
+    col_nodes = st.color_picker("Nodos fijos", "#FF007F")
     col_path_all = st.color_picker("Rutas fijas", "#007AFF")
-    col_path_highlight = st.color_picker("Ruta actual", "#FFFF00")
+    col_path_highlight = st.color_picker("Ruta actual (resaltada)", "#FFFF00")
 
     calcular = st.button("Calcular ruta")
 
@@ -163,7 +165,7 @@ RGB_NODES        = hex_to_rgb(col_nodes)
 RGB_PATH_ALL     = hex_to_rgb(col_path_all)
 RGB_PATH_CURRENT = hex_to_rgb(col_path_highlight)
 
-# ---------------- LÓGICA DE RUTA ----------------
+# ---------------- LÓGICA CUANDO HACES CLICK EN "Calcular ruta" ----------------
 last_tramo_df = None
 last_dist_km = None
 last_t_min = None
@@ -172,11 +174,11 @@ last_destino = None
 update_ok = False
 
 if calcular:
-    # Coordenadas (se generan si faltan)
+    # 1. obtener coords del origen/destino (o generarlas si faltan)
     o_lat, o_lon = asegurar_coords_en_mem(origen_nombre)
     d_lat, d_lon = asegurar_coords_en_mem(destino_nombre)
 
-    # Distancia directa y tiempo estimado
+    # 2. calcular distancia/tiempo estimado
     last_dist_km = haversine_km(o_lat, o_lon, d_lat, d_lon)
     vel_kmh = 30.0
     last_t_min = (last_dist_km / vel_kmh) * 60.0
@@ -184,13 +186,13 @@ if calcular:
     last_origen = origen_nombre
     last_destino = destino_nombre
 
-    # DataFrame de este tramo (para tabla/descarga)
+    # 3. dataframe de este tramo (para tabla y descarga)
     last_tramo_df = pd.DataFrame([
         {"nombre": origen_nombre,  "lat": o_lat, "lon": o_lon},
         {"nombre": destino_nombre, "lat": d_lat, "lon": d_lon},
     ])
 
-    # 1. Actualizar lista de nodos globales (permanentes)
+    # 4. agregar nodos de esta ruta al grafo FIJO (acumulado)
     nuevos_puntos = pd.DataFrame([
         {"nombre": origen_nombre,  "lat": o_lat, "lon": o_lon},
         {"nombre": destino_nombre, "lat": d_lat, "lon": d_lon},
@@ -200,7 +202,7 @@ if calcular:
         .drop_duplicates(subset=["nombre"], keep="last")
     )
 
-    # 2. Agregar arista al grafo permanente (todas las rutas históricas)
+    # 5. agregar la nueva arista al grafo FIJO (todas las rutas históricas)
     st.session_state.graph_edges.append({
         "path": [[o_lon, o_lat], [d_lon, d_lat]],
         "origen": origen_nombre,
@@ -209,7 +211,8 @@ if calcular:
         "t_min": f"{last_t_min:.1f}"
     })
 
-    # 3. Guardar la arista ACTUAL como highlight (solamente la última)
+    # 6. guardar esta MISMA arista como la "resaltada" (última ruta actual)
+    #    esto NO borra las anteriores del grafo fijo; solo cambia qué ruta se pinta en amarillo arriba
     st.session_state.highlight_edge = [{
         "path": [[o_lon, o_lat], [d_lon, d_lat]],
         "origen": origen_nombre,
@@ -220,13 +223,14 @@ if calcular:
 
     update_ok = True
 
-# ---------------- MAPA ----------------
+# ---------------- DIBUJO DEL MAPA ----------------
 col1, col2 = st.columns([1, 2])
 
+# ¿tenemos ya puntos en la red fija?
 if len(st.session_state.graph_points) > 0:
     puntos_plot = st.session_state.graph_points.rename(columns={"lon": "lng"}).copy()
 
-    # Capa de NODOS fijos acumulados
+    # Capa de NODOS fijos (todas las paradas vistas hasta ahora)
     nodes_layer = pdk.Layer(
         "ScatterplotLayer",
         data=puntos_plot,
@@ -239,7 +243,7 @@ if len(st.session_state.graph_points) > 0:
         pickable=True,
     )
 
-    # Capa de TODAS las aristas históricas (color fijo)
+    # Capa de TODAS las aristas históricas (toda la red base)
     edges_layer_all = pdk.Layer(
         "PathLayer",
         data=st.session_state.graph_edges,
@@ -250,22 +254,22 @@ if len(st.session_state.graph_points) > 0:
         pickable=True,
     )
 
-    # Capa de la RUTA ACTUAL (solo la última calculada) encima en otro color
+    # Capa de la RUTA ACTUAL resaltada (solo la última calculada)
     if len(st.session_state.highlight_edge) > 0:
         edges_layer_highlight = pdk.Layer(
             "PathLayer",
             data=st.session_state.highlight_edge,
             get_path="path",
-            get_width=8,           # más grueso para que se note encima
+            get_width=8,          # un poquito más gruesa
             width_scale=10,
-            get_color=RGB_PATH_CURRENT,
+            get_color=RGB_PATH_CURRENT,  # color distinto
             pickable=True,
         )
         layers_to_draw = [edges_layer_all, edges_layer_highlight, nodes_layer]
     else:
         layers_to_draw = [edges_layer_all, nodes_layer]
 
-    # Centro del mapa: promedio de todos los puntos que ya existen
+    # Centro del mapa = promedio de todos los nodos ya conocidos
     center_lat = float(puntos_plot["lat"].mean())
     center_lon = float(puntos_plot["lng"].mean())
 
@@ -294,14 +298,16 @@ if len(st.session_state.graph_points) > 0:
             ),
             use_container_width=True
         )
+
 else:
-    # mapa vacío inicial
+    # mapa vacío inicial (antes de cualquier cálculo)
     view_state = pdk.ViewState(
         latitude=BASE_LAT,
         longitude=BASE_LON,
         zoom=14,
         pitch=0
     )
+
     with col2:
         st.pydeck_chart(
             pdk.Deck(
@@ -330,7 +336,10 @@ with col1:
         st.dataframe(last_tramo_df, use_container_width=True)
     else:
         st.info(
-            "Presioná 'Calcular ruta' para agregar nodos y arista al grafo fijo.\n"
-            "La última ruta calculada se resalta encima con otro color."
+            "1. Elegí Origen y Destino.\n"
+            "2. Presioná 'Calcular ruta'.\n\n"
+            "- Los nodos y rutas van quedando fijos en el mapa.\n"
+            "- La última ruta se pinta encima en otro color."
         )
+
 
