@@ -2,8 +2,6 @@ import streamlit as st
 import pandas as pd
 import pydeck as pdk
 import math
-import networkx as nx
-import plotly.graph_objects as go
 
 # ---------------- CONFIG INICIAL ----------------
 st.set_page_config(page_title="Rutas San Marcos", layout="wide")
@@ -145,109 +143,61 @@ def asegurar_coords_en_mem(nombre_lugar: str):
         else:
             return float(lat_val), float(lon_val)
 
-def build_graph_figure(rgb_nodes, rgb_edges):
+def build_graph_graphviz(rgb_nodes, rgb_edges):
     """
-    Construye la vista de grafo (abstracta, no mapa).
-    Usa networkx spring_layout para posicionar nodos de forma estética.
+    Construye el grafo lógico usando Graphviz (que Streamlit puede renderizar sin librerías externas).
+    Cada nodo = lugar. Cada arista = conexión calculada.
     """
-
-    # 1. Crear grafo lógico con los nombres
-    G = nx.Graph()
 
     # nodos únicos
-    pts = st.session_state.graph_points[["nombre", "lat", "lon"]].drop_duplicates()
-    for _, row in pts.iterrows():
-        G.add_node(row["nombre"])
+    pts = st.session_state.graph_points[["nombre"]].drop_duplicates()
 
-    # aristas según lo que ya calculamos
+    if pts.empty:
+        return None
+
+    # Armamos el código DOT de Graphviz
+    # Usamos 'graph' (no 'digraph') porque las conexiones son no dirigidas.
+    # También metemos estilos básicos con los colores elegidos.
+
+    # color de nodos y aristas en formato #RRGGBB
+    nodes_hex = "#{:02X}{:02X}{:02X}".format(*rgb_nodes)
+    edges_hex = "#{:02X}{:02X}{:02X}".format(*rgb_edges)
+
+    dot_lines = []
+    dot_lines.append('graph G {')
+    dot_lines.append('  layout=dot;')         # que intente ordenarlos
+    dot_lines.append('  rankdir=LR;')         # izquierda->derecha (más tipo ruta)
+    dot_lines.append('  splines=true;')
+    dot_lines.append('  node [shape=circle, style=filled, color="#000000", fontname="Helvetica", fontsize=10, fillcolor="' + nodes_hex + '"];')
+    dot_lines.append('  edge [color="' + edges_hex + '", penwidth=2];')
+
+    # declarar nodos
+    for _, row in pts.iterrows():
+        nombre = row["nombre"].replace('"', '\\"')
+        dot_lines.append(f'  "{nombre}";')
+
+    # declarar aristas
+    # usamos pares (a -- b)
+    # evitamos duplicados con un set ordenado
+    edges_set = set()
     for e in st.session_state.graph_edges:
         a = e.get("a")
         b = e.get("b")
-        if a and b:
-            G.add_edge(a, b)
+        if not a or not b:
+            continue
+        key = tuple(sorted([a, b]))
+        if key not in edges_set:
+            edges_set.add(key)
 
-    if len(G.nodes) == 0:
-        return None  # nada que dibujar todavía
+    for (a, b) in edges_set:
+        a_esc = a.replace('"', '\\"')
+        b_esc = b.replace('"', '\\"')
+        dot_lines.append(f'  "{a_esc}" -- "{b_esc}";')
 
-    # 2. Layout bonito (spring)
-    # seed fijo para que no se mueva locamente cada vez
-    pos = nx.spring_layout(G, seed=42)
+    dot_lines.append('}')
 
-    # 3. Construir trazos de aristas
-    edge_x = []
-    edge_y = []
-    for a, b in G.edges():
-        x0, y0 = pos[a]
-        x1, y1 = pos[b]
-        edge_x += [x0, x1, None]
-        edge_y += [y0, y1, None]
-
-    # 4. Construir nodos
-    node_x = []
-    node_y = []
-    node_text = []
-    for n in G.nodes():
-        x, y = pos[n]
-        node_x.append(x)
-        node_y.append(y)
-        node_text.append(n)
-
-    # 5. Grafo con Plotly
-    fig = go.Figure()
-
-    # aristas
-    fig.add_trace(
-        go.Scatter(
-            x=edge_x,
-            y=edge_y,
-            mode="lines",
-            line=dict(
-                width=2,
-                color=f"rgb({rgb_edges[0]},{rgb_edges[1]},{rgb_edges[2]})"
-            ),
-            hoverinfo="none",
-            showlegend=False,
-        )
-    )
-
-    # nodos (con etiqueta)
-    fig.add_trace(
-        go.Scatter(
-            x=node_x,
-            y=node_y,
-            mode="markers+text",
-            marker=dict(
-                size=18,
-                color=f"rgb({rgb_nodes[0]},{rgb_nodes[1]},{rgb_nodes[2]})",
-                line=dict(width=1, color="#000000"),
-            ),
-            text=node_text,
-            textposition="top center",
-            hoverinfo="text",
-            showlegend=False,
-        )
-    )
-
-    fig.update_layout(
-        title="📍 Grafo de paradas (vista abstracta)",
-        title_x=0.5,
-        plot_bgcolor="rgba(0,0,0,0)",
-        paper_bgcolor="rgba(0,0,0,0)",
-        margin=dict(l=10, r=10, t=50, b=10),
-        xaxis=dict(
-            showgrid=False,
-            zeroline=False,
-            showticklabels=False
-        ),
-        yaxis=dict(
-            showgrid=False,
-            zeroline=False,
-            showticklabels=False
-        ),
-        height=500,
-    )
-
-    return fig
+    dot_src = "\n".join(dot_lines)
+    return dot_src
 
 # ---------------- SIDEBAR ----------------
 with st.sidebar:
@@ -287,7 +237,7 @@ if calcular:
     last_origen = origen_nombre
     last_destino = destino_nombre
 
-    # tramo actual
+    # tramo actual (tabla resumen)
     last_tramo_df = pd.DataFrame([
         {"nombre": origen_nombre,  "lat": o_lat, "lon": o_lon},
         {"nombre": destino_nombre, "lat": d_lat, "lon": d_lon},
@@ -421,10 +371,9 @@ with tab_grafo:
         "Cada punto es una parada y cada línea es una conexión que ya calculaste."
     )
 
-    fig_grafo = build_graph_figure(RGB_NODES, RGB_PATH)
+    dot_src = build_graph_graphviz(RGB_NODES, RGB_PATH)
 
-    if fig_grafo is None:
+    if dot_src is None:
         st.warning("Todavía no hay suficientes datos para dibujar el grafo. Calculá al menos una ruta 👇")
     else:
-        st.plotly_chart(fig_grafo, use_container_width=True)
-
+        st.graphviz_chart(dot_src, use_container_width=True)
