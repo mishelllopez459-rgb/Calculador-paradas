@@ -460,3 +460,4 @@ with tab_grafo:
         st.warning("Todavía no hay suficientes datos para dibujar el grafo. Calculá al menos una ruta 👇")
     else:
         st.graphviz_chart(dot_src, use_container_width=True)
+
