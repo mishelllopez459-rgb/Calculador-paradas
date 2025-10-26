@@ -144,48 +144,94 @@ def asegurar_coords_en_mem(nombre_lugar: str):
             return float(lat_val), float(lon_val)
 
 # ---------------- GRAFO ORDENADO ----------------
+# ---------------- GRAFO ORDENADO ----------------
 def build_graph_graphviz(rgb_nodes, rgb_edges):
     """
-    Construye un grafo ORDENADO (izquierda -> derecha)
-    usando SOLO los lugares base definidos en LUGARES_NUEVOS.
-    Cada lugar es un nodo.
-    Cada nodo se conecta con el siguiente para formar una línea limpia.
-    No mete clusters, ni layout raro, ni rutas dinámicas del usuario.
+    Grafo estilo red (como en ejemplos de grafos de programación):
+    - Cada parada es un nodo.
+    - Varias aristas entre paradas relacionadas.
+    - Layout 'neato' para que se distribuya automáticamente en 2D.
+    - No toca nada dinámico de la sesión ni el mapa.
     """
 
-    # Usamos exactamente el orden actual de LUGARES_NUEVOS.
-    base_route = LUGARES_NUEVOS
+    # Nodos base (tus lugares)
+    nodos_base = [
+        "Parque Central", "Catedral", "Terminal de Buses", "Hospital Regional",
+        "Cancha Los Angeles", "Cancha Sintetica Golazo", "Aeropuerto Nacional",
+        "Iglesia Candelero de Oro", "Centro de Salud", "Megapaca",
+        "CANICA (Casa de los Niños)", "Aldea San Rafael Soche", "Pollo Campero",
+        "INTECAP San Marcos", "Salón Quetzal", "SAT San Marcos", "Bazar Chino"
+    ]
 
-    if not base_route:
+    # Aristas base (conexiones lógicas para que se vea como una red)
+    aristas_base = [
+        # Centro / comercio
+        ("Parque Central", "Catedral"),
+        ("Parque Central", "Pollo Campero"),
+        ("Parque Central", "Megapaca"),
+        ("Megapaca", "Bazar Chino"),
+        ("Bazar Chino", "Terminal de Buses"),
+        ("Pollo Campero", "Terminal de Buses"),
+
+        # Servicios / gobierno
+        ("Parque Central", "SAT San Marcos"),
+        ("SAT San Marcos", "INTECAP San Marcos"),
+        ("INTECAP San Marcos", "Salón Quetzal"),
+        ("Salón Quetzal", "Centro de Salud"),
+        ("Centro de Salud", "Hospital Regional"),
+
+        # Periferia / salida
+        ("Hospital Regional", "Cancha Los Angeles"),
+        ("Cancha Los Angeles", "Cancha Sintetica Golazo"),
+        ("Cancha Sintetica Golazo", "Iglesia Candelero de Oro"),
+        ("Iglesia Candelero de Oro", "CANICA (Casa de los Niños)"),
+        ("CANICA (Casa de los Niños)", "Aldea San Rafael Soche"),
+        ("Aldea San Rafael Soche", "Aeropuerto Nacional"),
+
+        # Conexiones largas/troncales
+        ("Terminal de Buses", "Aeropuerto Nacional"),
+        ("Hospital Regional", "Terminal de Buses"),
+    ]
+
+    if not nodos_base:
         return None
 
-    # Convertimos colores elegidos en formato "#RRGGBB"
+    # Colores a #RRGGBB
     nodes_hex = "#{:02X}{:02X}{:02X}".format(*rgb_nodes)
     edges_hex = "#{:02X}{:02X}{:02X}".format(*rgb_edges)
 
     dot_lines = []
     dot_lines.append('graph G {')
+    # Distribución tipo red
+    dot_lines.append('  graph [layout=neato, overlap=false, splines=true];')
+    # Estilo de nodos y aristas
+    dot_lines.append(
+        f'  node [shape=circle, style=filled, fontname="Helvetica", fontsize=10, '
+        f'color="#000000", fillcolor="{nodes_hex}"];'
+    )
+    dot_lines.append(
+        f'  edge [color="{edges_hex}", penwidth=2];'
+    )
 
-    # Forzar que Graphviz dibuje horizontal, parejo y sin enredos.
-    dot_lines.append('  graph [rankdir=LR, layout=dot, splines=false, nodesep=0.6, ranksep=1.0, ordering="out"];')
-    dot_lines.append('  node [shape=circle, style=filled, color="#000000", fontname="Helvetica", fontsize=10, width=1.1, fixedsize=true, fillcolor="' + nodes_hex + '"];')
-    dot_lines.append('  edge [color="' + edges_hex + '", penwidth=2, constraint=true];')
+    # Declarar nodos
+    for nombre in nodos_base:
+        safe = nombre.replace('"', '\\"')
+        dot_lines.append(f'  "{safe}";')
 
-    # Todos en el mismo "rank" para que estén alineados en una fila
-    dot_lines.append('  { rank=same;')
-    for lugar in base_route:
-        safe_name = lugar.replace('"', '\\"')
-        dot_lines.append(f'    "{safe_name}";')
-    dot_lines.append('  }')
-
-    # Conectar cada parada con la siguiente en el orden dado
-    for i in range(len(base_route) - 1):
-        a = base_route[i].replace('"', '\\"')
-        b = base_route[i + 1].replace('"', '\\"')
-        dot_lines.append(f'  "{a}" -- "{b}";')
+    # Declarar aristas (evitar duplicados A-B / B-A)
+    vistos = set()
+    for a, b in aristas_base:
+        a_s = a.replace('"', '\\"')
+        b_s = b.replace('"', '\\"')
+        key = tuple(sorted([a_s, b_s]))
+        if key in vistos:
+            continue
+        vistos.add(key)
+        dot_lines.append(f'  "{a_s}" -- "{b_s}";')
 
     dot_lines.append('}')
-    dot_src = "\n".join(dot_lines)
+    return "\n".join(dot_lines)
+
     return dot_src
 
 # ---------------- SIDEBAR ----------------
