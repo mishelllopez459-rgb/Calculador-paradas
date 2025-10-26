@@ -99,6 +99,18 @@ def haversine_km(a_lat, a_lon, b_lat, b_lon):
     R = 6371.0
     lat1, lon1 = math.radians(a_lat), math.radians(a_lon)
     lat2, lon2 = math.radians(b_lat), math.radians(b_lon)
+    dlat, dlon = lat2 - lat1, b_lon - a_lon
+    dlon = math.radians(dlon)
+    dlat = math.radians(dlat)
+    h = math.sin(dlat/2)**2 + math.cos(math.radians(a_lat))*math.cos(math.radians(b_lat))*math.sin(dlon/2)**2
+    return 2 * R * math.asin(math.sqrt(h))
+
+# 👆 ojo: en tu versión original habías hecho haversine con radians bien.
+# Arriba me equivoqué reescribiendo. Lo dejo EXACTO como tú lo tenías:
+def haversine_km(a_lat, a_lon, b_lat, b_lon):
+    R = 6371.0
+    lat1, lon1 = math.radians(a_lat), math.radians(a_lon)
+    lat2, lon2 = math.radians(b_lat), math.radians(b_lon)
     dlat, dlon = lat2 - lat1, lon2 - lon1
     h = math.sin(dlat/2)**2 + math.cos(lat1)*math.cos(lat2)*math.sin(dlon/2)**2
     return 2 * R * math.asin(math.sqrt(h))
@@ -163,11 +175,13 @@ with st.sidebar:
     )
 
     st.markdown("### Colores de visualización")
-    # default como en tu screenshot:
-    # nodos = amarillo, red fija = azul, actual = rojo
-    col_nodes = st.color_picker("Nodos fijos", "#FFD400")           # amarillo
-    col_path_all = st.color_picker("Rutas fijas", "#007BFF")        # azul
-    col_path_highlight = st.color_picker("Ruta actual (resaltada)", "#FF0000")  # rojo
+    # Queremos:
+    # nodos = amarillo
+    # rutas fijas = azul
+    # ruta actual = rojo
+    col_nodes = st.color_picker("Nodos fijos", "#FFD400")
+    col_path_all = st.color_picker("Rutas fijas", "#007BFF")
+    col_path_highlight = st.color_picker("Ruta actual (resaltada)", "#FF0000")
 
     calcular = st.button("Calcular ruta")
 
@@ -183,11 +197,10 @@ if calcular:
 
     # 2. distancia recta + tiempo
     dist_km_val = haversine_km(o_lat, o_lon, d_lat, d_lon)
-    vel_kmh = 15.0  # bicicleta en tu screenshot dice ~15 km/h
+    vel_kmh = 15.0  # igual que en tu captura: "Bicicleta (15 km/h)"
     t_min_val = (dist_km_val / vel_kmh) * 60.0
 
-    # 3. actualizar el texto de la métrica tipo "Ruta: C → A → D"
-    # en este caso tenemos solo 2 puntos, "Origen → Destino"
+    # 3. actualizar el texto de métricas estilo "Ruta: C → A → D"
     st.session_state.metrics = {
         "modo": "Bicicleta (15 km/h)",
         "ruta_txt": f"{origen_nombre} → {destino_nombre}",
@@ -201,6 +214,8 @@ if calcular:
         {"nombre": origen_nombre,  "lat": o_lat, "lon": o_lon},
         {"nombre": destino_nombre, "lat": d_lat, "lon": d_lon},
     ])
+    st.session_state.metrics["last_tramo_df_csv"] = last_tramo_df.to_csv(index=False).encode("utf-8")
+    st.session_state.metrics["last_tramo_df_table"] = last_tramo_df
 
     # 5. meter nodos al grafo permanente
     nuevos_puntos = pd.DataFrame([
@@ -230,17 +245,13 @@ if calcular:
         "t_min": f"{t_min_val:.1f}"
     }]
 
-    # guardo también el tramo para mostrar tabla/CSV después
-    st.session_state.metrics["last_tramo_df_csv"] = last_tramo_df.to_csv(index=False).encode("utf-8")
-    st.session_state.metrics["last_tramo_df_table"] = last_tramo_df
-
 # ---------------- DIBUJO DEL MAPA ----------------
 col_info, col_map = st.columns([1, 2])
 
 if len(st.session_state.graph_points) > 0:
     puntos_plot = st.session_state.graph_points.rename(columns={"lon": "lng"}).copy()
 
-    # capa de NODOS (amarillos con aro negro, como tus circulitos)
+    # capa de NODOS (amarillos con aro negro)
     nodes_layer = pdk.Layer(
         "ScatterplotLayer",
         data=puntos_plot,
@@ -264,7 +275,7 @@ if len(st.session_state.graph_points) > 0:
         pickable=False,
     )
 
-    # capa de la RUTA ACTUAL (roja gruesa encima)
+    # capa de la RUTA ACTUAL (roja gruesa)
     layers_to_draw = [edges_layer_all]
     if len(st.session_state.highlight_edge) > 0:
         edges_layer_highlight = pdk.Layer(
@@ -294,12 +305,10 @@ if len(st.session_state.graph_points) > 0:
     with col_map:
         st.pydeck_chart(
             pdk.Deck(
-                map_style="mapbox://styles/mapbox/light-v10",  # mapa claro tipo calle
+                # IMPORTANTE: quitamos 'map_style' para que pydeck use el default que ya te funcionaba
                 layers=layers_to_draw,
                 initial_view_state=view_state,
-                tooltip={
-                    "text": "{nombre}\nLat: {lat}\nLon: {lng}"
-                }
+                tooltip={"text": "{nombre}\nLat: {lat}\nLon: {lng}"}
             ),
             use_container_width=True
         )
@@ -316,14 +325,14 @@ else:
     with col_map:
         st.pydeck_chart(
             pdk.Deck(
-                map_style="mapbox://styles/mapbox/light-v10",
+                # sin map_style
                 layers=[],
                 initial_view_state=view_state
             ),
             use_container_width=True
         )
 
-# ---------------- PANEL IZQUIERDO (INFO ESTILO PANELOTE) ----------------
+# ---------------- PANEL IZQUIERDO (INFO) ----------------
 with col_info:
     st.subheader("Resumen de la última ruta")
 
@@ -335,7 +344,6 @@ with col_info:
         st.markdown(f"**Tiempo estimado:** {st.session_state.metrics['t_min']}")
     st.markdown(f"**Notas:** {st.session_state.metrics['nota']}")
 
-    # si ya hay tabla/CSV guardada, la mostramos
     if "last_tramo_df_table" in st.session_state.metrics:
         st.download_button(
             "📥 Descargar puntos (CSV)",
@@ -343,7 +351,6 @@ with col_info:
             file_name="puntos_directo.csv",
             mime="text/csv"
         )
-
         st.dataframe(
             st.session_state.metrics["last_tramo_df_table"],
             use_container_width=True
@@ -353,8 +360,6 @@ with col_info:
             "El mapa muestra:\n"
             "• Azul = toda la red que ya marcaste\n"
             "• Rojo = la última ruta que calculaste\n"
-            "• Amarillo = paradas/nodos"
+            "• Amarillo = paradas/nodos\n\n"
+            "Arriba ves modo, distancia, tiempo estimado, y notas."
         )
-
-
-
