@@ -143,96 +143,71 @@ def asegurar_coords_en_mem(nombre_lugar: str):
         else:
             return float(lat_val), float(lon_val)
 
-# ---------------- GRAFO ORDENADO ----------------
-# ---------------- GRAFO ORDENADO ----------------
+# ---------------- GRAFO ORDENADO / RED ----------------
 def build_graph_graphviz(rgb_nodes, rgb_edges):
     """
-    Grafo estilo red (como en ejemplos de grafos de programación):
-    - Cada parada es un nodo.
-    - Varias aristas entre paradas relacionadas.
-    - Layout 'neato' para que se distribuya automáticamente en 2D.
-    - No toca nada dinámico de la sesión ni el mapa.
+    Genera un grafo tipo red (no línea recta).
+    Truco: usamos 'dot' (que es lo que Streamlit renderiza) pero
+    le marcamos una ESPINA horizontal y ramitas arriba/abajo.
+    Eso se parece más al grafo que me mostraste.
+
+    - La "espina" principal va izquierda -> derecha.
+    - Desde cada punto salen conexiones extra.
+    - Así deja de ser una sola fila aburrida.
     """
 
-    # Nodos base (tus lugares)
-    nodos_base = [
-        "Parque Central", "Catedral", "Terminal de Buses", "Hospital Regional",
-        "Cancha Los Angeles", "Cancha Sintetica Golazo", "Aeropuerto Nacional",
-        "Iglesia Candelero de Oro", "Centro de Salud", "Megapaca",
-        "CANICA (Casa de los Niños)", "Aldea San Rafael Soche", "Pollo Campero",
-        "INTECAP San Marcos", "Salón Quetzal", "SAT San Marcos", "Bazar Chino"
-    ]
-
-    # Aristas base (conexiones lógicas para que se vea como una red)
-    aristas_base = [
-        # Centro / comercio
-        ("Parque Central", "Catedral"),
-        ("Parque Central", "Pollo Campero"),
-        ("Parque Central", "Megapaca"),
-        ("Megapaca", "Bazar Chino"),
-        ("Bazar Chino", "Terminal de Buses"),
-        ("Pollo Campero", "Terminal de Buses"),
-
-        # Servicios / gobierno
-        ("Parque Central", "SAT San Marcos"),
-        ("SAT San Marcos", "INTECAP San Marcos"),
-        ("INTECAP San Marcos", "Salón Quetzal"),
-        ("Salón Quetzal", "Centro de Salud"),
-        ("Centro de Salud", "Hospital Regional"),
-
-        # Periferia / salida
-        ("Hospital Regional", "Cancha Los Angeles"),
-        ("Cancha Los Angeles", "Cancha Sintetica Golazo"),
-        ("Cancha Sintetica Golazo", "Iglesia Candelero de Oro"),
-        ("Iglesia Candelero de Oro", "CANICA (Casa de los Niños)"),
-        ("CANICA (Casa de los Niños)", "Aldea San Rafael Soche"),
-        ("Aldea San Rafael Soche", "Aeropuerto Nacional"),
-
-        # Conexiones largas/troncales
-        ("Terminal de Buses", "Aeropuerto Nacional"),
-        ("Hospital Regional", "Terminal de Buses"),
-    ]
-
-    if not nodos_base:
-        return None
-
-    # Colores a #RRGGBB
+    # Colores a formato #RRGGBB
     nodes_hex = "#{:02X}{:02X}{:02X}".format(*rgb_nodes)
     edges_hex = "#{:02X}{:02X}{:02X}".format(*rgb_edges)
 
     dot_lines = []
     dot_lines.append('graph G {')
-    # Distribución tipo red
-    dot_lines.append('  graph [layout=neato, overlap=false, splines=true];')
-    # Estilo de nodos y aristas
+    dot_lines.append('  rankdir=LR;')
+    dot_lines.append('  splines=true;')
     dot_lines.append(
-        f'  node [shape=circle, style=filled, fontname="Helvetica", fontsize=10, '
-        f'color="#000000", fillcolor="{nodes_hex}"];'
+        f'  node [shape=circle, style=filled, fontname="Helvetica", '
+        f'fontsize=10, color="#000000", fillcolor="{nodes_hex}"];'
     )
     dot_lines.append(
         f'  edge [color="{edges_hex}", penwidth=2];'
     )
 
-    # Declarar nodos
-    for nombre in nodos_base:
-        safe = nombre.replace('"', '\\"')
-        dot_lines.append(f'  "{safe}";')
+    # ---- ESPINA PRINCIPAL (misma fila / rank=same)
+    # Parque Central -> SAT San Marcos -> Hospital Regional ->
+    # Cancha Los Angeles -> Aeropuerto Nacional
+    dot_lines.append('  { rank=same; "Parque Central" -- "SAT San Marcos" -- "Hospital Regional" -- "Cancha Los Angeles" -- "Aeropuerto Nacional"; }')
 
-    # Declarar aristas (evitar duplicados A-B / B-A)
-    vistos = set()
-    for a, b in aristas_base:
-        a_s = a.replace('"', '\\"')
-        b_s = b.replace('"', '\\"')
-        key = tuple(sorted([a_s, b_s]))
-        if key in vistos:
-            continue
-        vistos.add(key)
-        dot_lines.append(f'  "{a_s}" -- "{b_s}";')
+    # ---- RAMAS DESDE "Parque Central"
+    dot_lines.append('  "Parque Central" -- "Catedral";')
+    dot_lines.append('  "Parque Central" -- "Pollo Campero";')
+    dot_lines.append('  "Parque Central" -- "Megapaca";')
+
+    # comercio / mercado
+    dot_lines.append('  "Megapaca" -- "Bazar Chino";')
+    dot_lines.append('  "Bazar Chino" -- "Terminal de Buses";')
+    dot_lines.append('  "Pollo Campero" -- "Terminal de Buses";')
+
+    # ---- RAMA SERVICIOS/GOBIERNO hacia la derecha de Parque Central
+    dot_lines.append('  "SAT San Marcos" -- "INTECAP San Marcos";')
+    dot_lines.append('  "INTECAP San Marcos" -- "Salón Quetzal";')
+    dot_lines.append('  "Salón Quetzal" -- "Centro de Salud";')
+    # cerramos hacia el eje de salud
+    dot_lines.append('  "Centro de Salud" -- "Hospital Regional";')
+
+    # ---- RAMA PERIFERIA desde Hospital Regional / Cancha Los Angeles
+    dot_lines.append('  "Hospital Regional" -- "Cancha Los Angeles";')
+    dot_lines.append('  "Cancha Los Angeles" -- "Cancha Sintetica Golazo";')
+    dot_lines.append('  "Cancha Sintetica Golazo" -- "Iglesia Candelero de Oro";')
+    dot_lines.append('  "Iglesia Candelero de Oro" -- "CANICA (Casa de los Niños)";')
+    dot_lines.append('  "CANICA (Casa de los Niños)" -- "Aldea San Rafael Soche";')
+    dot_lines.append('  "Aldea San Rafael Soche" -- "Aeropuerto Nacional";')
+
+    # conexión larga de buses directo al aeropuerto
+    dot_lines.append('  "Terminal de Buses" -- "Aeropuerto Nacional";')
 
     dot_lines.append('}')
-    return "\n".join(dot_lines)
 
-    return dot_src
+    return "\n".join(dot_lines)
 
 # ---------------- SIDEBAR ----------------
 with st.sidebar:
@@ -402,8 +377,8 @@ with tab_mapa:
 with tab_grafo:
     st.markdown("### 🔗 Grafo de conexiones (vista lógica)")
     st.caption(
-        "Nodos = paradas. Aristas = conexión directa entre una parada y la siguiente. "
-        "Ordenado de izquierda a derecha con las paradas base."
+        "Nodos = paradas. Aristas = conexiones entre paradas. "
+        "Estructura en espina con ramales (no solo una línea)."
     )
 
     dot_src = build_graph_graphviz(RGB_NODES, RGB_PATH)
@@ -412,4 +387,5 @@ with tab_grafo:
         st.warning("Todavía no hay datos para dibujar el grafo.")
     else:
         st.graphviz_chart(dot_src, use_container_width=True)
+
 
