@@ -2,11 +2,50 @@ import streamlit as st
 import pandas as pd
 import pydeck as pdk
 import math
-from itertools import combinations
 
 # ---------------- CONFIG INICIAL ----------------
 st.set_page_config(page_title="Rutas San Marcos", layout="wide")
-st.title("🚌 Calculador de paradas — San Marcos (grafo + highlight)")
+
+# Estilos básicos (panel más bonito + tarjetita de leyenda)
+st.markdown("""
+<style>
+.summary-header {
+    font-size: 1.4rem;
+    font-weight: 600;
+    margin-bottom: 0.5rem;
+    color: white;
+}
+.summary-label {
+    font-weight: 600;
+    color: white;
+}
+.summary-text {
+    color: white;
+    margin-bottom: 0.5rem;
+    line-height: 1.4;
+}
+.legend-card {
+    background-color: rgba(100,150,200,0.15);
+    border: 1px solid rgba(100,150,200,0.4);
+    color: white;
+    padding: 0.75rem 1rem;
+    border-radius: 0.5rem;
+    font-size: 0.9rem;
+    line-height: 1.4;
+    margin-top: 0.75rem;
+}
+.small-label {
+    font-size: 0.9rem;
+    line-height: 1.4;
+    color: white;
+}
+.bold-line {
+    font-weight: 600;
+}
+</style>
+""", unsafe_allow_html=True)
+
+st.title("🚌 Calculador de paradas — San Marcos")
 
 # Centro base para generar coordenadas cuando falten
 BASE_LAT = 14.965
@@ -26,19 +65,18 @@ LUGARES_NUEVOS = [
     "INTECAP San Marcos", "Salón Quetzal", "SAT San Marcos", "Bazar Chino"
 ]
 
-# Normalizar columnas básicas
+# Normalizar columnas
 for col in ["id", "nombre"]:
     if col in nodos.columns:
         nodos[col] = nodos[col].astype(str).str.strip()
 else:
-    # si viene sin columnas bien, las forzamos
     nodos = nodos.reindex(columns=["id", "nombre", "lat", "lon"])
 
 for col in ["id", "nombre", "lat", "lon"]:
     if col not in nodos.columns:
         nodos[col] = None
 
-# Asegurar que todos los lugares estén listados aunque no tengan coordenadas
+# Asegurar que todos los lugares existan en el df
 def asegurar_lugares(df: pd.DataFrame, nombres: list) -> pd.DataFrame:
     existentes = set(df["nombre"].astype(str).str.lower()) if "nombre" in df else set()
     rows = []
@@ -64,26 +102,35 @@ def asegurar_lugares(df: pd.DataFrame, nombres: list) -> pd.DataFrame:
 
 nodos = asegurar_lugares(nodos, LUGARES_NUEVOS)
 
-# Guardar nodos en session_state para poder modificarlos (asignar coords faltantes)
+# Guardar en memoria de sesión (nodos base editables en runtime)
 if "nodos_mem" not in st.session_state:
     st.session_state.nodos_mem = nodos.copy()
+nodos = st.session_state.nodos_mem
 
-# --- estado persistente para el highlight rojo (última arista seleccionada)
+# ---------------- ESTADO DEL GRAFO EN SESIÓN ----------------
+# nodos acumulados (toda la red fija que ya se construyó)
+if "graph_points" not in st.session_state:
+    st.session_state.graph_points = pd.DataFrame(columns=["nombre", "lat", "lon"])
+
+# aristas acumuladas fijas (todas las rutas históricas)
+if "graph_edges" not in st.session_state:
+    st.session_state.graph_edges = []
+
+# arista resaltada (última ruta calculada)
 if "highlight_edge" not in st.session_state:
     st.session_state.highlight_edge = []
 
-# --- estado persistente para métricas mostradas
+# Métricas mostradas en el panel izquierdo
 if "metrics" not in st.session_state:
     st.session_state.metrics = {
         "modo": "Bicicleta (15 km/h)",
         "ruta_txt": "—",
         "dist_km": None,
         "t_min": None,
-        "nota": "Red aproximada. Coordenadas generadas si faltan."
+        "nota": "Red aproximada. Coordenadas generadas si faltan.",
+        "last_tramo_df_csv": None,
+        "last_tramo_df_table": None,
     }
-
-# refrescamos referencia local
-nodos_mem = st.session_state.nodos_mem
 
 # ---------------- FUNCIONES AUX ----------------
 def hex_to_rgb(h: str):
@@ -99,126 +146,122 @@ def haversine_km(a_lat, a_lon, b_lat, b_lon):
     return 2 * R * math.asin(math.sqrt(h))
 
 def pseudo_offset(nombre: str):
-    """
-    Crea coordenadas falsas pero estables cerca de BASE_LAT/LON
-    usando el nombre como semilla.
-    Así cada lugar siempre cae más o menos en el mismo sitio.
-    """
+    # coords determinísticas cerca del centro BASE_LAT/LON
     s_val = 0
     for i, ch in enumerate(nombre):
         s_val += (i + 1) * ord(ch)
-    lat_off = ((s_val % 17) - 8) * 0.0005  # ~ +/-0.004
+    lat_off = ((s_val % 17) - 8) * 0.0005
     lon_off = (((s_val // 17) % 17) - 8) * 0.0005
     return BASE_LAT + lat_off, BASE_LON + lon_off
 
-def coord_de_lugar(nombre_lugar: str):
+def asegurar_coords_en_mem(nombre_lugar: str):
     """
-    Asegura que un lugar tenga lat/lon en st.session_state.nodos_mem.
-    Devuelve lat, lon.
+    Devuelve (lat, lon) para el lugar.
+    Si no existen, las genera, las guarda en nodos_mem y luego las usa.
     """
     df = st.session_state.nodos_mem
-    idx_list = df.index[df["nombre"] == nombre_lugar].tolist()
+    idx = df.index[df["nombre"] == nombre_lugar]
 
-    if not idx_list:
-        # Si ni siquiera existe, lo creamos desde cero
+    if len(idx) == 0:
         lat_new, lon_new = pseudo_offset(nombre_lugar)
         nuevo = {
             "id": f"AUTO_{nombre_lugar}",
             "nombre": nombre_lugar,
             "lat": lat_new,
-            "lon": lon_new,
+            "lon": lon_new
         }
         st.session_state.nodos_mem = pd.concat(
             [st.session_state.nodos_mem, pd.DataFrame([nuevo])],
             ignore_index=True
         )
         return lat_new, lon_new
+    else:
+        i = idx[0]
+        lat_val = st.session_state.nodos_mem.at[i, "lat"]
+        lon_val = st.session_state.nodos_mem.at[i, "lon"]
 
-    i = idx_list[0]
-    lat_val = st.session_state.nodos_mem.at[i, "lat"]
-    lon_val = st.session_state.nodos_mem.at[i, "lon"]
-
-    if pd.isna(lat_val) or pd.isna(lon_val):
-        lat_new, lon_new = pseudo_offset(nombre_lugar)
-        st.session_state.nodos_mem.at[i, "lat"] = lat_new
-        st.session_state.nodos_mem.at[i, "lon"] = lon_new
-        return lat_new, lon_new
-
-    return float(lat_val), float(lon_val)
-
-def construir_grafo_base():
-    """
-    Construye:
-    - puntos_base: todos los nodos con coords (nombre, lat, lon)
-    - aristas_base: TODAS las conexiones entre pares de nodos (para que se vea grafo)
-      Cada arista es {"path": [[lonA, latA],[lonB, latB]], ... }
-    Esto es lo azul del mapa.
-    """
-    # asegurar coords para todos los lugares listados
-    for nm in st.session_state.nodos_mem["nombre"]:
-        coord_de_lugar(str(nm))
-
-    df_ok = st.session_state.nodos_mem.copy()
-    df_ok = df_ok.dropna(subset=["lat", "lon"]).reset_index(drop=True)
-
-    # puntos_base
-    puntos_base = df_ok[["nombre", "lat", "lon"]].copy()
-
-    # aristas_base: conectamos todos contra todos (combinations)
-    aristas = []
-    for i, j in combinations(df_ok.index.tolist(), 2):
-        a_lat = df_ok.at[i, "lat"]; a_lon = df_ok.at[i, "lon"]; a_nom = df_ok.at[i, "nombre"]
-        b_lat = df_ok.at[j, "lat"]; b_lon = df_ok.at[j, "lon"]; b_nom = df_ok.at[j, "nombre"]
-
-        aristas.append({
-            "path": [[a_lon, a_lat], [b_lon, b_lat]],
-            "origen": a_nom,
-            "destino": b_nom,
-            "dist_km": f"{haversine_km(a_lat, a_lon, b_lat, b_lon):.2f}",
-            "t_min": ""
-        })
-
-    return puntos_base, aristas
+        if pd.isna(lat_val) or pd.isna(lon_val):
+            lat_new, lon_new = pseudo_offset(nombre_lugar)
+            st.session_state.nodos_mem.at[i, "lat"] = lat_new
+            st.session_state.nodos_mem.at[i, "lon"] = lon_new
+            return lat_new, lon_new
+        else:
+            return float(lat_val), float(lon_val)
 
 # ---------------- SIDEBAR (CONTROLES) ----------------
 with st.sidebar:
     st.header("Parámetros")
 
-    origen_nombre = st.selectbox(
+    origen_nombre  = st.selectbox(
         "Origen",
-        sorted(st.session_state.nodos_mem["nombre"].astype(str)),
+        sorted(nodos["nombre"].astype(str)),
         key="sel_origen"
     )
     destino_nombre = st.selectbox(
         "Destino",
-        sorted(st.session_state.nodos_mem["nombre"].astype(str)),
+        sorted(nodos["nombre"].astype(str)),
         index=1,
         key="sel_destino"
     )
 
-    st.markdown("### Colores del grafo")
-    # Amarillo nodos, Azul grafo base, Rojo highlight actual (igual que screenshot vibe)
-    col_nodes = st.color_picker("Nodos (grafo base)", "#FFD400")
-    col_path_all = st.color_picker("Aristas del grafo base", "#007BFF")
-    col_path_highlight = st.color_picker("Arista seleccionada", "#FF0000")
+    # Colores fijos tipo screenshot:
+    # nodos: amarillo, grafo base: celeste, highlight: rojo
+    col_nodes = "#FFD400"
+    col_path_all = "#00CFFF"
+    col_path_highlight = "#FF0033"
 
-    calcular = st.button("Calcular / Resaltar esta arista")
+    calcular = st.button("Calcular ruta")
 
-RGB_NODES        = hex_to_rgb(col_nodes)
-RGB_PATH_ALL     = hex_to_rgb(col_path_all)
-RGB_PATH_CURRENT = hex_to_rgb(col_path_highlight)
+RGB_NODES        = hex_to_rgb(col_nodes)          # amarillo nodos
+RGB_PATH_ALL     = hex_to_rgb(col_path_all)       # azul/celeste conexiones base
+RGB_PATH_CURRENT = hex_to_rgb(col_path_highlight) # rojo ruta actual
 
-# ---------------- SI EL USUARIO PIDE UNA RUTA ----------------
+# ---------------- LÓGICA CUANDO HACES CLICK EN "Calcular ruta" ----------------
 if calcular:
-    # coords reales (o generadas) para los 2 nodos elegidos
-    o_lat, o_lon = coord_de_lugar(origen_nombre)
-    d_lat, d_lon = coord_de_lugar(destino_nombre)
+    # 1. coords del origen/destino (se generan si faltan)
+    o_lat, o_lon = asegurar_coords_en_mem(origen_nombre)
+    d_lat, d_lon = asegurar_coords_en_mem(destino_nombre)
 
+    # 2. distancia recta + tiempo
     dist_km_val = haversine_km(o_lat, o_lon, d_lat, d_lon)
-    vel_kmh = 15.0  # bici en tu captura
+    vel_kmh = 15.0  # igual que "Bicicleta (15 km/h)" en tu panel
     t_min_val = (dist_km_val / vel_kmh) * 60.0
 
-    # guardamos highlight_edge (ROJO)
+    # 3. dataframe de este tramo (para tabla y CSV)
+    tramo_df = pd.DataFrame([
+        {"nombre": origen_nombre,  "lat": o_lat, "lon": o_lon},
+        {"nombre": destino_nombre, "lat": d_lat, "lon": d_lon},
+    ])
+
+    # 4. actualizar métricas del panel
+    st.session_state.metrics["modo"] = "Bicicleta (15 km/h)"
+    st.session_state.metrics["ruta_txt"] = f"{origen_nombre} → {destino_nombre}"
+    st.session_state.metrics["dist_km"] = f"{dist_km_val:.3f} km"
+    st.session_state.metrics["t_min"]   = f"{t_min_val:.1f} min"
+    st.session_state.metrics["nota"]    = "Red aproximada. Coordenadas generadas si faltan."
+    st.session_state.metrics["last_tramo_df_csv"]   = tramo_df.to_csv(index=False).encode("utf-8")
+    st.session_state.metrics["last_tramo_df_table"] = tramo_df
+
+    # 5. meter nodos de esta ruta a la red fija
+    nuevos_puntos = pd.DataFrame([
+        {"nombre": origen_nombre,  "lat": o_lat, "lon": o_lon},
+        {"nombre": destino_nombre, "lat": d_lat, "lon": d_lon},
+    ])
+    st.session_state.graph_points = (
+        pd.concat([st.session_state.graph_points, nuevos_puntos], ignore_index=True)
+        .drop_duplicates(subset=["nombre"], keep="last")
+    )
+
+    # 6. agregar esta arista a la red fija (todas las conexiones, celeste)
+    st.session_state.graph_edges.append({
+        "path": [[o_lon, o_lat], [d_lon, d_lat]],
+        "origen": origen_nombre,
+        "destino": destino_nombre,
+        "dist_km": f"{dist_km_val:.2f}",
+        "t_min": f"{t_min_val:.1f}"
+    })
+
+    # 7. guardar también como arista resaltada actual (rojo)
     st.session_state.highlight_edge = [{
         "path": [[o_lon, o_lat], [d_lon, d_lat]],
         "origen": origen_nombre,
@@ -227,49 +270,29 @@ if calcular:
         "t_min": f"{t_min_val:.1f}"
     }]
 
-    # guardamos métricas que se ven a la izquierda
-    st.session_state.metrics = {
-        "modo": "Bicicleta (15 km/h)",
-        "ruta_txt": f"{origen_nombre} → {destino_nombre}",
-        "dist_km": f"{dist_km_val:.3f} km",
-        "t_min": f"{t_min_val:.1f} min",
-        "nota": "Red aproximada. Coordenadas generadas si faltan."
-    }
-
-    # para mostrar en la tabla y CSV
-    last_tramo_df = pd.DataFrame([
-        {"nombre": origen_nombre,  "lat": o_lat, "lon": o_lon},
-        {"nombre": destino_nombre, "lat": d_lat, "lon": d_lon},
-    ])
-    st.session_state.metrics["last_tramo_df_csv"] = last_tramo_df.to_csv(index=False).encode("utf-8")
-    st.session_state.metrics["last_tramo_df_table"] = last_tramo_df
-
-# ---------------- CONSTRUIR EL GRAFO BASE (AZUL + NODOS AMARILLOS) ----------------
-puntos_base, aristas_base = construir_grafo_base()
-
-# ---------------- DIBUJAR ----------------
+# ---------------- DIBUJO DEL MAPA ----------------
 col_info, col_map = st.columns([1, 2])
 
-if len(puntos_base) > 0:
-    puntos_plot = puntos_base.rename(columns={"lon": "lng"}).copy()
+if len(st.session_state.graph_points) > 0:
+    puntos_plot = st.session_state.graph_points.rename(columns={"lon": "lng"}).copy()
 
-    # Capa de NODOS AMARILLOS con borde negro
+    # Capa de NODOS (amarillos con borde negro, círculos grandes)
     nodes_layer = pdk.Layer(
         "ScatterplotLayer",
         data=puntos_plot,
         get_position="[lng, lat]",
-        get_radius=90,
-        radius_min_pixels=5,
+        get_radius=120,
+        radius_min_pixels=6,
         get_fill_color=RGB_NODES,
         get_line_color=[0, 0, 0],
         line_width_min_pixels=2,
         pickable=True,
     )
 
-    # Capa de TODAS LAS ARISTAS DEL GRAFO (AZUL)
+    # Capa de TODAS las aristas históricas (celeste, más delgada)
     edges_layer_all = pdk.Layer(
         "PathLayer",
-        data=aristas_base,
+        data=st.session_state.graph_edges,
         get_path="path",
         get_width=4,
         width_scale=6,
@@ -277,7 +300,7 @@ if len(puntos_base) > 0:
         pickable=False,
     )
 
-    # Capa de LA ARISTA ACTUAL (ROJO, MÁS GRUESA) si existe highlight
+    # Capa de la RUTA ACTUAL (roja, más gruesa, por encima)
     layers_to_draw = [edges_layer_all]
     if len(st.session_state.highlight_edge) > 0:
         edges_layer_highlight = pdk.Layer(
@@ -291,10 +314,10 @@ if len(puntos_base) > 0:
         )
         layers_to_draw.append(edges_layer_highlight)
 
-    # nodos encima de las líneas
+    # Nodos al final para que queden encima de las líneas
     layers_to_draw.append(nodes_layer)
 
-    # centramos el mapa en el promedio de TODOS los nodos del grafo
+    # Centro del mapa = promedio de todos los puntos
     center_lat = float(puntos_plot["lat"].mean())
     center_lon = float(puntos_plot["lng"].mean())
 
@@ -308,17 +331,16 @@ if len(puntos_base) > 0:
     with col_map:
         st.pydeck_chart(
             pdk.Deck(
-                # SIN map_style forzado -> usa default de pydeck que sí te estaba funcionando
+                # mapa oscuro como en tu captura
+                map_style="mapbox://styles/mapbox/dark-v10",
                 layers=layers_to_draw,
                 initial_view_state=view_state,
-                tooltip={
-                    "text": "{nombre}\nLat: {lat}\nLon: {lng}"
-                }
+                tooltip={"text": "{nombre}\nLat: {lat}\nLon: {lng}"}
             ),
             use_container_width=True
         )
 else:
-    # Si por alguna razón no hay puntos (no debería pasar), centramos en base
+    # mapa vacío inicial
     view_state = pdk.ViewState(
         latitude=BASE_LAT,
         longitude=BASE_LON,
@@ -328,38 +350,50 @@ else:
     with col_map:
         st.pydeck_chart(
             pdk.Deck(
+                map_style="mapbox://styles/mapbox/dark-v10",
                 layers=[],
                 initial_view_state=view_state
             ),
             use_container_width=True
         )
 
-# ---------------- PANEL IZQUIERDO (INFO COMO EN LA FOTO) ----------------
+# ---------------- PANEL IZQUIERDO (ORDENADO + LEYENDA) ----------------
+m = st.session_state.metrics
+
 with col_info:
-    st.subheader("Resumen de la última selección")
+    st.markdown('<div class="summary-header">Resumen de la última selección</div>', unsafe_allow_html=True)
 
-    st.markdown(f"**Modo:** {st.session_state.metrics['modo']}")
-    st.markdown(f"**Ruta:** {st.session_state.metrics['ruta_txt']}")
-    if st.session_state.metrics["dist_km"] is not None:
-        st.markdown(f"**Distancia:** {st.session_state.metrics['dist_km']}")
-    if st.session_state.metrics["t_min"] is not None:
-        st.markdown(f"**Tiempo estimado:** {st.session_state.metrics['t_min']}")
-    st.markdown(f"**Notas:** {st.session_state.metrics['nota']}")
+    st.markdown(f'<div class="summary-text"><span class="summary-label">Modo:</span> {m["modo"]}</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="summary-text"><span class="summary-label">Ruta:</span> {m["ruta_txt"]}</div>', unsafe_allow_html=True)
 
-    if "last_tramo_df_table" in st.session_state.metrics:
+    # Sólo mostramos distancia / tiempo si ya hay ruta calculada
+    if m["dist_km"] and m["t_min"]:
+        st.markdown(f'<div class="summary-text"><span class="summary-label">Distancia:</span> {m["dist_km"]}</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="summary-text"><span class="summary-label">Tiempo estimado:</span> {m["t_min"]}</div>', unsafe_allow_html=True)
+
+    st.markdown(f'<div class="summary-text"><span class="summary-label">Notas:</span> {m["nota"]}</div>', unsafe_allow_html=True)
+
+    # Leyenda bonita tipo tarjetita
+    st.markdown(
+        f"""
+        <div class="legend-card">
+        <div class="small-label">
+        <span class="bold-line" style="color:{col_path_all};">Azul</span> = grafo base (todas las conexiones)<br/>
+        <span class="bold-line" style="color:{col_path_highlight};">Rojo</span> = arista seleccionada ahora<br/>
+        <span class="bold-line" style="color:{col_nodes};">Amarillo</span> = nodos / lugares
+        </div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+    # Si ya hay una ruta calculada, mostramos tabla de puntos y botón CSV
+    if m["last_tramo_df_table"] is not None:
         st.download_button(
             "📥 Descargar puntos (CSV)",
-            data=st.session_state.metrics["last_tramo_df_csv"],
+            data=m["last_tramo_df_csv"],
             file_name="puntos_directo.csv",
             mime="text/csv"
         )
-        st.dataframe(
-            st.session_state.metrics["last_tramo_df_table"],
-            use_container_width=True
-        )
-    else:
-        st.info(
-            "Azul = grafo base (todas las conexiones)\n"
-            "Rojo = arista seleccionada ahora\n"
-            "Amarillo = nodos/lugares"
-        )
+
+        st.dataframe(m["last_tramo_df_table"], use_container_width=True)
