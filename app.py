@@ -68,15 +68,17 @@ if "nodos_mem" not in st.session_state:
 nodos = st.session_state.nodos_mem
 
 # ---------------- ESTADO DEL GRAFO EN SESIÓN ----------------
+# Nodos acumulados de todas las rutas calculadas
 if "graph_points" not in st.session_state:
     st.session_state.graph_points = pd.DataFrame(columns=["nombre", "lat", "lon"])
 
+# Aristas acumuladas permanentes
 if "graph_edges" not in st.session_state:
     st.session_state.graph_edges = []
 
-# Mantener firma de la ruta para resetear al cambiar
-if "last_route_sig" not in st.session_state:
-    st.session_state.last_route_sig = None
+# Última ruta calculada (para dibujarla encima con color distinto)
+if "highlight_edge" not in st.session_state:
+    st.session_state.highlight_edge = []
 
 # ---------------- AUX ----------------
 def hex_to_rgb(h: str):
@@ -101,6 +103,10 @@ def pseudo_offset(nombre: str):
     return BASE_LAT + lat_off, BASE_LON + lon_off
 
 def asegurar_coords_en_mem(nombre_lugar: str):
+    """
+    Devuelve lat/lon para el lugar. Si no existen, las inventa,
+    las guarda en nodos_mem, y devuelve eso.
+    """
     df = st.session_state.nodos_mem
     idx = df.index[df["nombre"] == nombre_lugar]
     if len(idx) == 0:
@@ -134,7 +140,6 @@ def asegurar_coords_en_mem(nombre_lugar: str):
 with st.sidebar:
     st.header("Parámetros")
 
-    # claves para detectar cambios
     origen_nombre  = st.selectbox(
         "Origen",
         sorted(nodos["nombre"].astype(str)),
@@ -148,23 +153,15 @@ with st.sidebar:
     )
 
     st.markdown("### Colores")
-    col_nodes = st.color_picker("Nodos", "#FF007F")
-    col_path  = st.color_picker("Ruta seleccionada", "#007AFF")
+    col_nodes = st.color_picker("Nodos (fijos)", "#FF007F")
+    col_path_all = st.color_picker("Rutas fijas", "#007AFF")
+    col_path_highlight = st.color_picker("Ruta actual", "#FFFF00")
 
     calcular = st.button("Calcular ruta")
 
-RGB_NODES = hex_to_rgb(col_nodes)
-RGB_PATH  = hex_to_rgb(col_path)
-
-# --------- RESETEAR GRAFO SI CAMBIA LA DIRECCIÓN (origen/destino) ----------
-route_sig = f"{origen_nombre}__{destino_nombre}"
-if st.session_state.last_route_sig is None:
-    st.session_state.last_route_sig = route_sig
-elif st.session_state.last_route_sig != route_sig:
-    # Limpia nodos y aristas automáticamente al cambiar de dirección
-    st.session_state.graph_points = pd.DataFrame(columns=["nombre", "lat", "lon"])
-    st.session_state.graph_edges = []
-    st.session_state.last_route_sig = route_sig
+RGB_NODES        = hex_to_rgb(col_nodes)
+RGB_PATH_ALL     = hex_to_rgb(col_path_all)
+RGB_PATH_CURRENT = hex_to_rgb(col_path_highlight)
 
 # ---------------- LÓGICA DE RUTA ----------------
 last_tramo_df = None
@@ -187,13 +184,13 @@ if calcular:
     last_origen = origen_nombre
     last_destino = destino_nombre
 
-    # DataFrame de este tramo
+    # DataFrame de este tramo (para tabla/descarga)
     last_tramo_df = pd.DataFrame([
         {"nombre": origen_nombre,  "lat": o_lat, "lon": o_lon},
         {"nombre": destino_nombre, "lat": d_lat, "lon": d_lon},
     ])
 
-    # Agregar nodos (sin duplicar)
+    # 1. Actualizar lista de nodos globales (permanentes)
     nuevos_puntos = pd.DataFrame([
         {"nombre": origen_nombre,  "lat": o_lat, "lon": o_lon},
         {"nombre": destino_nombre, "lat": d_lat, "lon": d_lon},
@@ -203,7 +200,7 @@ if calcular:
         .drop_duplicates(subset=["nombre"], keep="last")
     )
 
-    # Agregar la arista, incluyendo distancia y tiempo formateados
+    # 2. Agregar arista al grafo permanente (todas las rutas históricas)
     st.session_state.graph_edges.append({
         "path": [[o_lon, o_lat], [d_lon, d_lat]],
         "origen": origen_nombre,
@@ -211,6 +208,15 @@ if calcular:
         "dist_km": f"{last_dist_km:.2f}",
         "t_min": f"{last_t_min:.1f}"
     })
+
+    # 3. Guardar la arista ACTUAL como highlight (solamente la última)
+    st.session_state.highlight_edge = [{
+        "path": [[o_lon, o_lat], [d_lon, d_lat]],
+        "origen": origen_nombre,
+        "destino": destino_nombre,
+        "dist_km": f"{last_dist_km:.2f}",
+        "t_min": f"{last_t_min:.1f}"
+    }]
 
     update_ok = True
 
@@ -220,6 +226,7 @@ col1, col2 = st.columns([1, 2])
 if len(st.session_state.graph_points) > 0:
     puntos_plot = st.session_state.graph_points.rename(columns={"lon": "lng"}).copy()
 
+    # Capa de NODOS fijos acumulados
     nodes_layer = pdk.Layer(
         "ScatterplotLayer",
         data=puntos_plot,
@@ -232,17 +239,33 @@ if len(st.session_state.graph_points) > 0:
         pickable=True,
     )
 
-    edges_layer = pdk.Layer(
+    # Capa de TODAS las aristas históricas (color fijo)
+    edges_layer_all = pdk.Layer(
         "PathLayer",
         data=st.session_state.graph_edges,
         get_path="path",
         get_width=6,
         width_scale=8,
-        get_color=RGB_PATH,
-        pickable=True,  # <- ahora sí es seleccionable para tooltip
+        get_color=RGB_PATH_ALL,
+        pickable=True,
     )
 
-    # centro del mapa basado en los puntos actuales
+    # Capa de la RUTA ACTUAL (solo la última calculada) encima en otro color
+    if len(st.session_state.highlight_edge) > 0:
+        edges_layer_highlight = pdk.Layer(
+            "PathLayer",
+            data=st.session_state.highlight_edge,
+            get_path="path",
+            get_width=8,           # más grueso para que se note encima
+            width_scale=10,
+            get_color=RGB_PATH_CURRENT,
+            pickable=True,
+        )
+        layers_to_draw = [edges_layer_all, edges_layer_highlight, nodes_layer]
+    else:
+        layers_to_draw = [edges_layer_all, nodes_layer]
+
+    # Centro del mapa: promedio de todos los puntos que ya existen
     center_lat = float(puntos_plot["lat"].mean())
     center_lon = float(puntos_plot["lng"].mean())
 
@@ -256,7 +279,7 @@ if len(st.session_state.graph_points) > 0:
     with col2:
         st.pydeck_chart(
             pdk.Deck(
-                layers=[edges_layer, nodes_layer],
+                layers=layers_to_draw,
                 initial_view_state=view_state,
                 tooltip={
                     "text": (
@@ -307,8 +330,7 @@ with col1:
         st.dataframe(last_tramo_df, use_container_width=True)
     else:
         st.info(
-            "Cambia Origen/Destino y se limpia el mapa; "
-            "presiona 'Calcular ruta' para ver la nueva arista, nodos, "
-            "distancia y tiempo estimado."
+            "Presioná 'Calcular ruta' para agregar nodos y arista al grafo fijo.\n"
+            "La última ruta calculada se resalta encima con otro color."
         )
 
