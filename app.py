@@ -19,7 +19,7 @@ def tiempo_por_dist(dist_km: float, vel_kmh: float) -> float:
     return (dist_km / vel_kmh) * 60.0
 
 def haversine_km(lat1, lon1, lat2, lon2):
-    """Distancia en km usando Haversine (tierra aproximada esférica)."""
+    """Distancia en km usando Haversine."""
     R = 6371.0
     la1 = math.radians(lat1)
     lo1 = math.radians(lon1)
@@ -63,7 +63,7 @@ def ensure_extra_nodes(nodos_df: pd.DataFrame,
     for nombre, lat, lon in extra_nodes_with_coords:
         key = nombre.strip().lower()
         if key in existentes_lower:
-            # Ya existe nodo con este nombre -> asegurar coords.
+            # Ya existe -> asegurar coords.
             idxs = nodos_work.index[nodos_work["nombre"].str.lower() == key]
             if len(idxs) > 0:
                 i = idxs[0]
@@ -91,7 +91,7 @@ def ensure_extra_edges(aristas_df: pd.DataFrame,
                        pares: list[tuple[str, str]]) -> pd.DataFrame:
     """
     Asegura que existan aristas entre cada par dado por nombre.
-    Calcula distancia haversine y tiempo_min aprox (bus) si no existe.
+    Calcula distancia haversine y pone tiempo_min aprox (bus) si no existe.
     Si algún nodo no tiene coords válidas, se salta ese par.
     """
     work = aristas_df.copy()
@@ -118,7 +118,7 @@ def ensure_extra_edges(aristas_df: pd.DataFrame,
         a_id, a_lat, a_lon = info_por_nombre[a_name]
         b_id, b_lat, b_lon = info_por_nombre[b_name]
 
-        # coords tienen que existir
+        # coords deben existir
         if pd.isna(a_lat) or pd.isna(a_lon) or pd.isna(b_lat) or pd.isna(b_lon):
             continue
 
@@ -129,7 +129,7 @@ def ensure_extra_edges(aristas_df: pd.DataFrame,
 
         dist_km = haversine_km(a_lat, a_lon, b_lat, b_lon)
         t_bus_min  = tiempo_por_dist(dist_km, VEL_BUS_KMH)
-        # usamos bus como "tiempo_min" base aproximado si no había un valor real
+        # usamos bus como "tiempo_min" base aproximado si no había uno real
         t_min_real = t_bus_min
 
         row = {
@@ -160,7 +160,7 @@ def build_graph_graphviz(nodos_df: pd.DataFrame,
     se asume 1 km.
     """
 
-    # nodos urbanos clave (incluye los nuevos que agregaste)
+    # nodos urbanos clave (incluye TODOS los nuevos)
     nodos_extra = [
         "Parque Central",
         "Catedral",
@@ -182,9 +182,19 @@ def build_graph_graphviz(nodos_df: pd.DataFrame,
         "CANICA (Casa de los Niños)",
         "Aldea San Rafael Soche",
         "Aeropuerto Nacional",
+
+        # nuevos que pediste ahora:
+        "Gobernación San Marcos",
+        "DOWNTOWN CAFE Y DISCOTECA san marcos",
+        "Municipalidad de san marcos",
+        "Centro universitario CUSAM san marcos",
+        "CLICOLOR",
+        "Fundap microcredito san marcos",
+        "ACREDICOM R. L san marcos",
+        "Banrural san marcos",
     ]
 
-    # conexiones de la red urbana
+    # conexiones base de la red (anteriores + nuevas conexiones centro)
     conexiones_extra = [
         # centro / comercio
         ("Parque Central", "Catedral"),
@@ -194,7 +204,7 @@ def build_graph_graphviz(nodos_df: pd.DataFrame,
         ("Bazar Chino", "Terminal de Buses"),
         ("Pollo campero", "Terminal de Buses"),
 
-        # gobierno / servicios
+        # gobierno / servicios "viejos"
         ("Parque Central", "Sat san marcos"),
         ("Sat san marcos", "INTECAP San Marcos"),
         ("INTECAP San Marcos", "Salon quetzal"),
@@ -209,7 +219,7 @@ def build_graph_graphviz(nodos_df: pd.DataFrame,
         ("CANICA (Casa de los Niños)", "Aldea San Rafael Soche"),
         ("Aldea San Rafael Soche", "Aeropuerto Nacional"),
 
-        # periferia nueva que me diste
+        # periferia nueva que me diste en el turno anterior
         ("Pollo campero", "Parque benito juarez"),
         ("Parque benito juarez", "Canchas Santo Domingo"),
         ("Canchas Santo Domingo", "Salon quetzal"),
@@ -219,29 +229,43 @@ def build_graph_graphviz(nodos_df: pd.DataFrame,
         # conexiones largas
         ("Terminal de Buses", "Aeropuerto Nacional"),
         ("Hospital Regional", "Terminal de Buses"),
+
+        # 🔥 conexiones nuevas que me acabás de dar del centro cívico / bancos / zona nocturna:
+        ("Parque Central", "Municipalidad de san marcos"),
+        ("Municipalidad de san marcos", "Gobernación San Marcos"),
+        ("Gobernación San Marcos", "Sat san marcos"),
+        ("Municipalidad de san marcos", "Banrural san marcos"),
+        ("Banrural san marcos", "DOWNTOWN CAFE Y DISCOTECA san marcos"),
+        ("DOWNTOWN CAFE Y DISCOTECA san marcos", "Salon quetzal"),
+        ("Salon quetzal", "CLICOLOR"),
+        ("CLICOLOR", "Centro universitario CUSAM san marcos"),
+        ("Centro universitario CUSAM san marcos", "Fundap microcredito san marcos"),
+        ("Fundap microcredito san marcos", "CLICOLOR"),
+        ("Sat san marcos", "ACREDICOM R. L san marcos"),
+        ("ACREDICOM R. L san marcos", "Municipalidad de san marcos"),
     ]
 
-    # sacamos coords reales de nodos_df si existen
+    # coords reales si existen
     coords_por_nombre = {}
     for _, r in nodos_df.iterrows():
         coords_por_nombre[r["nombre"]] = (r["lat"], r["lon"])
 
-    # lista final de nodos = nodos CSV + extras
+    # lista final de nodos = nodos CSV + todos los extra
     nombres_csv = [str(x) for x in nodos_df["nombre"].tolist()]
     nodos_unificados = sorted(set(nombres_csv + nodos_extra))
 
-    # preparar aristas con etiquetas
+    # calcular aristas con etiquetas
     usados = set()
     aristas_dot = []
 
     for (a_name, b_name) in conexiones_extra:
-        # evitar duplicado si no es dirigido
+        # evitar duplicado si el grafo lógico es no dirigido
         key_pair = tuple(sorted([a_name, b_name]))
         if (not dirigido_flag) and (key_pair in usados):
             continue
         usados.add(key_pair)
 
-        # distancia real si tenemos ambos coords, sino 1km
+        # distancia real si tenemos coords. Sino 1 km
         if a_name in coords_por_nombre and b_name in coords_por_nombre:
             la, loa = coords_por_nombre[a_name]
             lb, lob = coords_por_nombre[b_name]
@@ -258,7 +282,7 @@ def build_graph_graphviz(nodos_df: pd.DataFrame,
         label_txt = f"{dist_km:.2f} km / {bus_min:.1f}m bus / {bici_min:.1f}m bici"
         aristas_dot.append((a_name, b_name, label_txt))
 
-    # construir DOT graphviz
+    # construir DOT para graphviz
     dot_lines = []
     dot_lines.append("graph G {")
     dot_lines.append('  graph [layout=neato, overlap=false, splines=true];')
@@ -275,7 +299,7 @@ def build_graph_graphviz(nodos_df: pd.DataFrame,
         safe = name.replace('"', '\\"')
         dot_lines.append(f'  "{safe}";')
 
-    # aristas con labels (dist/bus/bici)
+    # aristas con label distancia/bus/bici
     for (a_name, b_name, lbl) in aristas_dot:
         a_safe = a_name.replace('"', '\\"')
         b_safe = b_name.replace('"', '\\"')
@@ -299,6 +323,7 @@ aristas["destino"] = aristas["destino"].astype(str).str.strip()
 
 # ---------------- 2. AÑADIR NODOS NUEVOS CON COORDS REALES ----------------
 EXTRA_NODOS_COORDS = [
+    # nodos que ya habíamos metido
     ("Megapaca",                        14.963451, -91.791009),
     ("Pollo campero",                   14.965879, -91.811366),
     ("Sat san marcos",                  14.965911, -91.793319),
@@ -306,28 +331,52 @@ EXTRA_NODOS_COORDS = [
     ("Canchas Santo Domingo",           14.960118, -91.798793),
     ("Parque benito juarez",            14.958947, -91.802114),
     ("Iglesia Cristiana Buena Tierra",  14.949966, -91.809321),
+
+    # nodos NUEVOS que acabas de dar:
+    ("Gobernación San Marcos",                  14.966084, -91.794452),
+    ("DOWNTOWN CAFE Y DISCOTECA san marcos",    14.964449, -91.794986),
+    ("Municipalidad de san marcos",             14.964601, -91.793954),
+    ("Centro universitario CUSAM san marcos",   14.965126, -91.799426),
+    ("CLICOLOR",                                14.966102, -91.799505),
+    ("Fundap microcredito san marcos",          14.962564, -91.799215),
+    ("ACREDICOM R. L san marcos",               14.966154, -91.793269),
+    ("Banrural san marcos",                     14.965649, -91.795858),
 ]
 nodos = ensure_extra_nodes(nodos, EXTRA_NODOS_COORDS)
 
-# reconstruimos estos mapas de ayuda
+# reconstruimos maps de ayuda (nombre <-> id)
 id_por_nombre = {r["nombre"]: r["id"] for _, r in nodos.iterrows()}
 nombre_por_id = {r["id"]: r["nombre"] for _, r in nodos.iterrows()}
 
 # ---------------- 3. AÑADIR ARISTAS ENTRE ESOS NODOS NUEVOS ----------------
 EXTRA_ARISTAS_PARES = [
-    # centro/comercio
+    # centro / comercio
     ("Parque Central",        "Megapaca"),
     ("Parque Central",        "Pollo campero"),
 
-    # nueva zona que pediste
+    # zona nueva anterior
     ("Pollo campero",         "Parque benito juarez"),
     ("Parque benito juarez",  "Canchas Santo Domingo"),
     ("Canchas Santo Domingo", "Salon quetzal"),
     ("Pollo campero",         "Iglesia Cristiana Buena Tierra"),
     ("Iglesia Cristiana Buena Tierra", "Parque benito juarez"),
 
-    # gobierno / servicios
+    # gobierno / servicios viejo
     ("Sat san marcos",        "Salon quetzal"),
+
+    # 🔥 conexiones centro cívico / comercios / nocturno NUEVAS
+    ("Parque Central",                         "Municipalidad de san marcos"),
+    ("Municipalidad de san marcos",            "Gobernación San Marcos"),
+    ("Gobernación San Marcos",                 "Sat san marcos"),
+    ("Municipalidad de san marcos",            "Banrural san marcos"),
+    ("Banrural san marcos",                    "DOWNTOWN CAFE Y DISCOTECA san marcos"),
+    ("DOWNTOWN CAFE Y DISCOTECA san marcos",   "Salon quetzal"),
+    ("Salon quetzal",                          "CLICOLOR"),
+    ("CLICOLOR",                               "Centro universitario CUSAM san marcos"),
+    ("Centro universitario CUSAM san marcos",  "Fundap microcredito san marcos"),
+    ("Fundap microcredito san marcos",         "CLICOLOR"),
+    ("Sat san marcos",                         "ACREDICOM R. L san marcos"),
+    ("ACREDICOM R. L san marcos",              "Municipalidad de san marcos"),
 ]
 aristas = ensure_extra_edges(aristas, nodos, EXTRA_ARISTAS_PARES)
 
@@ -358,7 +407,7 @@ with st.sidebar:
 
     calcular = st.button("Calcular ruta")
 
-# convertir colores
+# convertir colores a rgb/hex
 RGB_NODES = hex_to_rgb(col_nodes)
 RGB_EDGES = hex_to_rgb(col_edges)
 RGB_PATH  = hex_to_rgb(col_path)
@@ -374,7 +423,7 @@ nombre_por_id = {r["id"]: r["nombre"] for _, r in nodos.iterrows()}
 # ---------------- 6. CONSTRUIR GRAFO NETWORKX (para ruta óptima) ----------------
 G = nx.DiGraph() if dirigido else nx.Graph()
 
-# nodos al grafo
+# nodos -> grafo
 for _, r in nodos.iterrows():
     G.add_node(
         r["id"],
@@ -383,7 +432,7 @@ for _, r in nodos.iterrows():
         lon=float(r["lon"]),
     )
 
-# aristas al grafo (enriquecidas con bus/bici)
+# aristas -> grafo (enriquecer con bus/bici)
 aristas_enriquecidas = []
 for _, r in aristas.iterrows():
     dist = float(r["distancia_km"])
@@ -413,10 +462,10 @@ for _, r in aristas.iterrows():
         capacidad=float(r.get("capacidad", 0)),
     )
 
-# usamos esto tanto para mapa como para tabla
+# dataframe de TODAS las aristas finales
 aristas_full_df = pd.DataFrame(aristas_enriquecidas)
 
-# ---------------- 7. FUNCIÓN RUTA ÓPTIMA CON SUMAS ----------------
+# ---------------- 7. FUNCIÓN RUTA ÓPTIMA ----------------
 def ruta_optima(o_id: str, d_id: str, peso: str):
     """
     Devuelve:
@@ -492,7 +541,7 @@ edges_layer = pdk.Layer(
     get_target_position="[lon_d, lat_d]",
     get_width=2,
     width_min_pixels=2,
-    get_color=RGB_EDGES,
+    get_color=hex_to_rgb("#9B9B9B"),  # usa color neutro para red base
     pickable=True,
 )
 
@@ -502,7 +551,7 @@ nodes_layer = pdk.Layer(
     get_position="[lng, lat]",
     get_radius=65,
     radius_min_pixels=3,
-    get_fill_color=RGB_NODES,
+    get_fill_color=hex_to_rgb("#FF007F"),
     get_line_color=[30, 30, 30],
     line_width_min_pixels=1,
     pickable=True,
@@ -514,12 +563,12 @@ view_state = pdk.ViewState(latitude=center_lat, longitude=center_lon, zoom=13)
 # ---------------- 9. GRAFO LÓGICO GRAPHVIZ ----------------
 dot_src = build_graph_graphviz(
     nodos_df=nodos,
-    hex_nodes=HEX_NODES,
-    hex_edges=HEX_PATH,   # que resalte
-    dirigido_flag=False   # para la vista lógica lo dejamos no dirigido
+    hex_nodes=rgb_to_hex(hex_to_rgb("#FF007F")),
+    hex_edges=rgb_to_hex(hex_to_rgb("#007AFF")),
+    dirigido_flag=False  # para diagrama lógico lo dejamos no dirigido
 )
 
-# ---------------- 10. UI PRINCIPAL: MAPA + GRAFO ----------------
+# ---------------- 10. UI PRINCIPAL ----------------
 tab_mapa, tab_grafo = st.tabs(["🗺️ Mapa geográfico", "🔗 Grafo de conexiones"])
 
 with tab_mapa:
@@ -530,7 +579,7 @@ with tab_mapa:
         destino_id = id_por_nombre[destino_nombre]
 
         try:
-            # Intentamos ruta en el grafo
+            # Intento ruta óptima usando el grafo conectado
             path_ids, totals, tramos_df = ruta_optima(origen_id, destino_id, criterio)
 
             ruta_nodos_df = pd.DataFrame(
@@ -548,7 +597,7 @@ with tab_mapa:
                 get_path="path",
                 get_width=6,
                 width_scale=8,
-                get_color=RGB_PATH,
+                get_color=hex_to_rgb("#007AFF"),
                 pickable=False,
             )
 
@@ -562,7 +611,6 @@ with tab_mapa:
                 st.markdown(f"**Paradas totales (incluye origen y destino):** {len(path_ids)}")
                 st.markdown(f"**Paradas intermedias:** {max(0, len(path_ids) - 2)}")
 
-                # Distancia total y tiempos totales
                 st.markdown(f"**Distancia total:** {totals['total_distancia_km']:.2f} km")
                 st.markdown(f"**Tiempo total estimado en bus (@{VEL_BUS_KMH:.0f} km/h):** {totals['total_bus_min']:.1f} min")
                 st.markdown(f"**Tiempo total estimado en bici (@{VEL_BICI_KMH:.0f} km/h):** {totals['total_bici_min']:.1f} min")
@@ -598,8 +646,7 @@ with tab_mapa:
                 )
 
         except nx.NetworkXNoPath:
-            # 🔥 Fallback cuando "No hay camino entre esos nodos con el grafo actual"
-            # Hacemos cálculo directo por línea recta entre origen y destino.
+            # fallback cuando no hay camino -> línea recta con dist/bus/bici
             o_row = nodos[nodos["id"] == origen_id].iloc[0]
             d_row = nodos[nodos["id"] == destino_id].iloc[0]
 
@@ -631,7 +678,7 @@ with tab_mapa:
                 get_path="path",
                 get_width=6,
                 width_scale=8,
-                get_color=RGB_PATH,
+                get_color=hex_to_rgb("#007AFF"),
                 pickable=False,
             )
 
@@ -665,7 +712,6 @@ with tab_mapa:
                 )
 
     else:
-        # estado inicial sin ruta calculada
         st.info("Elegí Origen y Destino y presioná **Calcular ruta** 👇")
         st.pydeck_chart(
             pdk.Deck(
@@ -678,8 +724,9 @@ with tab_mapa:
 with tab_grafo:
     st.markdown("### 🔗 Grafo de conexiones (vista lógica)")
     st.caption(
-        "Cada nodo es una parada (incluye las nuevas que agregaste con coordenadas). "
+        "Cada nodo es una parada (incluye las nuevas con coordenadas como Municipalidad, Gobernación,"
+        " Banrural, Downtown, CUSAM, etc.). "
         "Cada línea es una conexión urbana. "
-        "Las etiquetas enseñan distancia y minutos bus/bici calculados."
+        "Las etiquetas enseñan distancia estimada y minutos bus/bici."
     )
     st.graphviz_chart(dot_src, use_container_width=True)
