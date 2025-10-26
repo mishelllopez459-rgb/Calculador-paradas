@@ -143,140 +143,46 @@ def asegurar_coords_en_mem(nombre_lugar: str):
         else:
             return float(lat_val), float(lon_val)
 
-# ---------------- GRAFO BASE ORDENADO ----------------
-# Clusters (zonas) para que el grafo se vea limpio y lógico
-BASE_CLUSTERS = {
-    "Centro Histórico": [
-        "Parque Central",
-        "Catedral",
-        "Pollo Campero",
-        "Megapaca",
-        "Bazar Chino",
-        "Terminal de Buses"
-    ],
-    "Servicios / Gobierno": [
-        "SAT San Marcos",
-        "INTECAP San Marcos",
-        "Salón Quetzal",
-        "Centro de Salud",
-        "Hospital Regional"
-    ],
-    "Periferia / Barrios": [
-        "Cancha Los Angeles",
-        "Cancha Sintetica Golazo",
-        "Iglesia Candelero de Oro",
-        "CANICA (Casa de los Niños)",
-        "Aldea San Rafael Soche",
-        "Aeropuerto Nacional"
-    ]
-}
-
-# Aristas base que representan conexiones típicas / ruta lógica entre puntos
-# Estas conexiones dibujan el "esqueleto" del grafo para que se mire bien ordenado.
-BASE_EDGES = [
-    # Centro Histórico interno
-    ("Parque Central", "Catedral"),
-    ("Parque Central", "Pollo Campero"),
-    ("Parque Central", "Megapaca"),
-    ("Megapaca", "Bazar Chino"),
-    ("Bazar Chino", "Terminal de Buses"),
-
-    # Centro -> Servicios
-    ("Parque Central", "SAT San Marcos"),
-    ("SAT San Marcos", "INTECAP San Marcos"),
-    ("INTECAP San Marcos", "Salón Quetzal"),
-    ("Salón Quetzal", "Centro de Salud"),
-    ("Centro de Salud", "Hospital Regional"),
-
-    # Servicios -> Periferia
-    ("Hospital Regional", "Cancha Los Angeles"),
-    ("Cancha Los Angeles", "Cancha Sintetica Golazo"),
-    ("Cancha Sintetica Golazo", "Iglesia Candelero de Oro"),
-    ("Iglesia Candelero de Oro", "CANICA (Casa de los Niños)"),
-    ("CANICA (Casa de los Niños)", "Aldea San Rafael Soche"),
-    ("Aldea San Rafael Soche", "Aeropuerto Nacional"),
-
-    # Vínculo directo Terminal ↔ Periferia (rutas largas)
-    ("Terminal de Buses", "Aeropuerto Nacional"),
-]
-
+# ---------------- GRAFO ORDENADO ----------------
 def build_graph_graphviz(rgb_nodes, rgb_edges):
     """
-    Construye el grafo lógico usando Graphviz.
-    - Dibuja primero las rutas base (BASE_CLUSTERS + BASE_EDGES) ya ordenadas.
-    - Luego agrega también las conexiones dinámicas calculadas por el usuario.
+    Construye un grafo ORDENADO (izquierda -> derecha)
+    usando SOLO los lugares base definidos en LUGARES_NUEVOS.
+    Cada lugar es un nodo.
+    Cada nodo se conecta con el siguiente para formar una línea limpia.
+    No mete clusters, ni layout raro, ni rutas dinámicas del usuario.
     """
 
-    # Si no tenemos absolutamente nada, no dibujamos.
-    # (Igual normalmente tenemos BASE_CLUSTERS siempre)
-    all_nodes = set()
-    for group_nodes in BASE_CLUSTERS.values():
-        for n in group_nodes:
-            all_nodes.add(n)
+    # Usamos exactamente el orden actual de LUGARES_NUEVOS.
+    base_route = LUGARES_NUEVOS
 
-    if not all_nodes:
+    if not base_route:
         return None
 
-    # Convertimos colores elegidos por el usuario a formato "#RRGGBB"
+    # Convertimos colores elegidos en formato "#RRGGBB"
     nodes_hex = "#{:02X}{:02X}{:02X}".format(*rgb_nodes)
     edges_hex = "#{:02X}{:02X}{:02X}".format(*rgb_edges)
 
     dot_lines = []
     dot_lines.append('graph G {')
-    dot_lines.append('  layout=dot;')         # layout tipo jerárquico
-    dot_lines.append('  rankdir=LR;')         # izquierda -> derecha
-    dot_lines.append('  splines=true;')
-    dot_lines.append(
-        '  node [shape=circle, style=filled, color="#000000", fontname="Helvetica", fontsize=10, fillcolor="' +
-        nodes_hex + '"];'
-    )
-    dot_lines.append(
-        '  edge [color="' + edges_hex + '", penwidth=2];'
-    )
 
-    # Subgrafos (clusters) para que se vea ordenado por zonas
-    cluster_id = 0
-    for cluster_name, lugares in BASE_CLUSTERS.items():
-        dot_lines.append(f'  subgraph cluster_{cluster_id} {{')
-        dot_lines.append('    style=filled;')
-        dot_lines.append('    color="#E0E0E0";')
-        dot_lines.append('    fillcolor="#F9F9F9";')
-        dot_lines.append(f'    label="{cluster_name}";')
-        dot_lines.append('    fontname="Helvetica";')
-        dot_lines.append('    fontsize=11;')
-        dot_lines.append('    penwidth=1;')
+    # Forzar que Graphviz dibuje horizontal, parejo y sin enredos.
+    dot_lines.append('  graph [rankdir=LR, layout=dot, splines=false, nodesep=0.6, ranksep=1.0, ordering="out"];')
+    dot_lines.append('  node [shape=circle, style=filled, color="#000000", fontname="Helvetica", fontsize=10, width=1.1, fixedsize=true, fillcolor="' + nodes_hex + '"];')
+    dot_lines.append('  edge [color="' + edges_hex + '", penwidth=2, constraint=true];')
 
-        # rank=same para que se alineen más o menos a la misma altura dentro del cluster
-        dot_lines.append('    { rank=same;')
-        for lugar in lugares:
-            safe_lugar = lugar.replace('"', '\\"')
-            dot_lines.append(f'      "{safe_lugar}";')
-        dot_lines.append('    }')
+    # Todos en el mismo "rank" para que estén alineados en una fila
+    dot_lines.append('  { rank=same;')
+    for lugar in base_route:
+        safe_name = lugar.replace('"', '\\"')
+        dot_lines.append(f'    "{safe_name}";')
+    dot_lines.append('  }')
 
-        dot_lines.append('  }')
-        cluster_id += 1
-
-    # Conexiones base (aristas predefinidas para darle forma al grafo)
-    edges_set = set()
-    for a, b in BASE_EDGES:
-        key = tuple(sorted([a, b]))
-        if key not in edges_set:
-            edges_set.add(key)
-
-    # Conexiones dinámicas del usuario (rutas calculadas en la sesión)
-    for e in st.session_state.graph_edges:
-        a = e.get("a")
-        b = e.get("b")
-        if not a or not b:
-            continue
-        key = tuple(sorted([a, b]))
-        if key not in edges_set:
-            edges_set.add(key)
-
-    for (a, b) in edges_set:
-        a_esc = a.replace('"', '\\"')
-        b_esc = b.replace('"', '\\"')
-        dot_lines.append(f'  "{a_esc}" -- "{b_esc}";')
+    # Conectar cada parada con la siguiente en el orden dado
+    for i in range(len(base_route) - 1):
+        a = base_route[i].replace('"', '\\"')
+        b = base_route[i + 1].replace('"', '\\"')
+        dot_lines.append(f'  "{a}" -- "{b}";')
 
     dot_lines.append('}')
     dot_src = "\n".join(dot_lines)
@@ -326,7 +232,7 @@ if calcular:
         {"nombre": destino_nombre, "lat": d_lat, "lon": d_lon},
     ])
 
-    # agregar nodos al grafo global (sin duplicar)
+    # agregar nodos al grafo global (para el mapa real)
     nuevos_puntos = pd.DataFrame([
         {"nombre": origen_nombre,  "lat": o_lat, "lon": o_lon},
         {"nombre": destino_nombre, "lat": d_lat, "lon": d_lon},
@@ -336,7 +242,7 @@ if calcular:
         .drop_duplicates(subset=["nombre"], keep="last")
     )
 
-    # agregar arista al grafo global (esto también se reflejará en el grafo lógico)
+    # agregar arista al mapa real
     st.session_state.graph_edges.append({
         "path": [
             [o_lon, o_lat],
@@ -448,16 +354,16 @@ with tab_mapa:
 
 # ---- TAB GRAFO ----
 with tab_grafo:
-    st.markdown("### 🔎 Vista lógica de las conexiones")
+    st.markdown("### 🔗 Grafo de conexiones (vista lógica)")
     st.caption(
-        "Esto NO es el mapa real. Es la red ordenada de paradas: "
-        "agrupadas por zona y unidas por las rutas base + lo que vos vas calculando."
+        "Nodos = paradas. Aristas = conexión directa entre una parada y la siguiente. "
+        "Ordenado de izquierda a derecha con las paradas base."
     )
 
     dot_src = build_graph_graphviz(RGB_NODES, RGB_PATH)
 
     if dot_src is None:
-        st.warning("Todavía no hay suficientes datos para dibujar el grafo. Calculá al menos una ruta 👇")
+        st.warning("Todavía no hay datos para dibujar el grafo.")
     else:
         st.graphviz_chart(dot_src, use_container_width=True)
 
