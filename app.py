@@ -168,7 +168,7 @@ def ruta_optima(o_id: str, d_id: str, peso: str):
     return path_ids, resumen_totales, pd.DataFrame(detalle_tramos)
 
 # ---------------- MAPA (todas las aristas + nodos) ----------------
-# edges_df con coordenadas y tooltip info
+# edges_df con coordenadas y nombres para tooltip
 edges_df = (
     aristas_full_df
     .merge(
@@ -203,12 +203,6 @@ edges_layer = pdk.Layer(
     width_min_pixels=2,
     get_color=RGB_EDGES,
     pickable=True,
-    getTooltip="""
-        ({object.origen_nombre} → {object.destino_nombre})
-        Dist: {object.distancia_km} km
-        Bus: {object.tiempo_bus_min} min
-        Bici: {object.tiempo_bici_min} min
-    """,
 )
 
 # Capa de todos los nodos
@@ -231,14 +225,14 @@ view_state = pdk.ViewState(latitude=center_lat, longitude=center_lon, zoom=13)
 def build_graph_graphviz(nodos_df: pd.DataFrame,
                           aristas_df: pd.DataFrame,
                           hex_nodes: str,
-                          hex_edges: str):
+                          hex_edges: str,
+                          dirigido_flag: bool):
     """
     Genera un grafo lógico (no mapa) con TODOS los nodos y TODAS las aristas.
     Cada arista lleva label con:
       distancia_km
       min bus
       min bici
-    para que se vea como red, tipo grafo de teoría de grafos.
     """
 
     dot_lines = []
@@ -252,8 +246,7 @@ def build_graph_graphviz(nodos_df: pd.DataFrame,
         f'  edge [color="{hex_edges}", fontname="Helvetica", fontsize=9, penwidth=2];'
     )
 
-    # Declarar nodos usando el NOMBRE visible
-    # (esto hace que el grafo muestre "Parque Central" en vez de "L3" o lo que sea)
+    # Declarar nodos con el nombre visible
     for _, r in nodos_df.iterrows():
         nombre = str(r["nombre"]).replace('"', '\\"')
         dot_lines.append(f'  "{nombre}";')
@@ -269,9 +262,9 @@ def build_graph_graphviz(nodos_df: pd.DataFrame,
         o_name = nombre_por_id[o_id].replace('"', '\\"')
         d_name = nombre_por_id[d_id].replace('"', '\\"')
 
-        # evitar duplicados en grafo no dirigido
+        # si es no dirigido, evitamos duplicar A--B y B--A
         key = tuple(sorted([o_name, d_name]))
-        if not isinstance(G, nx.DiGraph):
+        if not dirigido_flag:
             if key in usados:
                 continue
             usados.add(key)
@@ -293,10 +286,11 @@ dot_src = build_graph_graphviz(
     nodos_df=nodos,
     aristas_df=aristas_full_df,
     hex_nodes=HEX_NODES,
-    hex_edges=HEX_PATH,  # usamos color ruta para que resalte
+    hex_edges=HEX_PATH,   # usamos el color de ruta seleccionada para resaltar
+    dirigido_flag=dirigido,
 )
 
-# ---------------- UI PRINCIPAL ----------------
+# ---------------- UI PRINCIPAL CON TABS ----------------
 tab_mapa, tab_grafo = st.tabs(["🗺️ Mapa geográfico", "🔗 Grafo de conexiones"])
 
 with tab_mapa:
@@ -371,6 +365,14 @@ with tab_mapa:
                     pdk.Deck(
                         layers=[edges_layer, nodes_layer, path_layer],
                         initial_view_state=view_state,
+                        tooltip={
+                            "text": (
+                                "{origen_nombre} → {destino_nombre}\n"
+                                "Dist: {distancia_km} km\n"
+                                "Bus: {tiempo_bus_min} min\n"
+                                "Bici: {tiempo_bici_min} min"
+                            )
+                        },
                     ),
                     use_container_width=True
                 )
@@ -383,6 +385,14 @@ with tab_mapa:
                     pdk.Deck(
                         layers=[edges_layer, nodes_layer],
                         initial_view_state=view_state,
+                        tooltip={
+                            "text": (
+                                "{origen_nombre} → {destino_nombre}\n"
+                                "Dist: {distancia_km} km\n"
+                                "Bus: {tiempo_bus_min} min\n"
+                                "Bici: {tiempo_bici_min} min"
+                            )
+                        },
                     ),
                     use_container_width=True
                 )
@@ -394,6 +404,14 @@ with tab_mapa:
             pdk.Deck(
                 layers=[edges_layer, nodes_layer],
                 initial_view_state=view_state,
+                tooltip={
+                    "text": (
+                        "{origen_nombre} → {destino_nombre}\n"
+                        "Dist: {distancia_km} km\n"
+                        "Bus: {tiempo_bus_min} min\n"
+                        "Bici: {tiempo_bici_min} min"
+                    )
+                },
             ),
             use_container_width=True
         )
@@ -401,8 +419,9 @@ with tab_mapa:
 with tab_grafo:
     st.markdown("### 🔗 Grafo de conexiones (vista lógica)")
     st.caption(
-        "Cada círculo es una parada. Cada línea es una conexión.\n"
-        "La etiqueta de cada línea muestra distancia km / min bus / min bici."
+        "Cada círculo es una parada (nodo). Cada línea es una conexión (arista).\n"
+        "La etiqueta de cada línea muestra: distancia km / min bus / min bici."
     )
 
     st.graphviz_chart(dot_src, use_container_width=True)
+
