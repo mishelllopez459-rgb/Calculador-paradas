@@ -2,6 +2,8 @@ import streamlit as st
 import pandas as pd
 import pydeck as pdk
 import math
+import networkx as nx
+import plotly.graph_objects as go
 
 # ---------------- CONFIG INICIAL ----------------
 st.set_page_config(page_title="Rutas San Marcos", layout="wide")
@@ -74,8 +76,9 @@ nodos = st.session_state.nodos_mem
 if "graph_points" not in st.session_state:
     st.session_state.graph_points = pd.DataFrame(columns=["nombre", "lat", "lon"])
 
-# aristas ya creadas
+# aristas ya creadas (guardamos también nombres para grafo lógico)
 if "graph_edges" not in st.session_state:
+    # cada item: { "path":[[lon1,lat1],[lon2,lat2]], "a":nombre_origen, "b":nombre_destino }
     st.session_state.graph_edges = []
 
 # ---------------- FUNCIONES AUX ----------------
@@ -96,14 +99,12 @@ def pseudo_offset(nombre: str):
     Genera un offset pequeño y estable en base al texto del nombre.
     Así podemos inventar coords si no existen en el CSV.
     """
-    # calculamos una especie de hash controlado
     s_val = 0
     for i, ch in enumerate(nombre):
         s_val += (i + 1) * ord(ch)
 
-    # hacemos dos offsets chicos (en grados ~0.005 máx aprox)
-    # para que los puntos no se encimen todos exactamente
-    lat_off = ((s_val % 17) - 8) * 0.0005  # entre ~-0.004 y +0.004
+    # off pequeño (±0.004 aprox) para que no se encimen todos
+    lat_off = ((s_val % 17) - 8) * 0.0005
     lon_off = (((s_val // 17) % 17) - 8) * 0.0005
 
     return BASE_LAT + lat_off, BASE_LON + lon_off
@@ -143,6 +144,110 @@ def asegurar_coords_en_mem(nombre_lugar: str):
             return lat_new, lon_new
         else:
             return float(lat_val), float(lon_val)
+
+def build_graph_figure(rgb_nodes, rgb_edges):
+    """
+    Construye la vista de grafo (abstracta, no mapa).
+    Usa networkx spring_layout para posicionar nodos de forma estética.
+    """
+
+    # 1. Crear grafo lógico con los nombres
+    G = nx.Graph()
+
+    # nodos únicos
+    pts = st.session_state.graph_points[["nombre", "lat", "lon"]].drop_duplicates()
+    for _, row in pts.iterrows():
+        G.add_node(row["nombre"])
+
+    # aristas según lo que ya calculamos
+    for e in st.session_state.graph_edges:
+        a = e.get("a")
+        b = e.get("b")
+        if a and b:
+            G.add_edge(a, b)
+
+    if len(G.nodes) == 0:
+        return None  # nada que dibujar todavía
+
+    # 2. Layout bonito (spring)
+    # seed fijo para que no se mueva locamente cada vez
+    pos = nx.spring_layout(G, seed=42)
+
+    # 3. Construir trazos de aristas
+    edge_x = []
+    edge_y = []
+    for a, b in G.edges():
+        x0, y0 = pos[a]
+        x1, y1 = pos[b]
+        edge_x += [x0, x1, None]
+        edge_y += [y0, y1, None]
+
+    # 4. Construir nodos
+    node_x = []
+    node_y = []
+    node_text = []
+    for n in G.nodes():
+        x, y = pos[n]
+        node_x.append(x)
+        node_y.append(y)
+        node_text.append(n)
+
+    # 5. Grafo con Plotly
+    fig = go.Figure()
+
+    # aristas
+    fig.add_trace(
+        go.Scatter(
+            x=edge_x,
+            y=edge_y,
+            mode="lines",
+            line=dict(
+                width=2,
+                color=f"rgb({rgb_edges[0]},{rgb_edges[1]},{rgb_edges[2]})"
+            ),
+            hoverinfo="none",
+            showlegend=False,
+        )
+    )
+
+    # nodos (con etiqueta)
+    fig.add_trace(
+        go.Scatter(
+            x=node_x,
+            y=node_y,
+            mode="markers+text",
+            marker=dict(
+                size=18,
+                color=f"rgb({rgb_nodes[0]},{rgb_nodes[1]},{rgb_nodes[2]})",
+                line=dict(width=1, color="#000000"),
+            ),
+            text=node_text,
+            textposition="top center",
+            hoverinfo="text",
+            showlegend=False,
+        )
+    )
+
+    fig.update_layout(
+        title="📍 Grafo de paradas (vista abstracta)",
+        title_x=0.5,
+        plot_bgcolor="rgba(0,0,0,0)",
+        paper_bgcolor="rgba(0,0,0,0)",
+        margin=dict(l=10, r=10, t=50, b=10),
+        xaxis=dict(
+            showgrid=False,
+            zeroline=False,
+            showticklabels=False
+        ),
+        yaxis=dict(
+            showgrid=False,
+            zeroline=False,
+            showticklabels=False
+        ),
+        height=500,
+    )
+
+    return fig
 
 # ---------------- SIDEBAR ----------------
 with st.sidebar:
@@ -203,101 +308,123 @@ if calcular:
         "path": [
             [o_lon, o_lat],
             [d_lon, d_lat],
-        ]
+        ],
+        "a": origen_nombre,
+        "b": destino_nombre,
     })
 
     update_ok = True
 
-# ---------------- MAPA ----------------
-col1, col2 = st.columns([1, 2])
+# ---------------- UI PRINCIPAL ----------------
+# Tabs: Mapa geográfico vs Grafo abstracto
+tab_mapa, tab_grafo = st.tabs(["🗺️ Mapa geográfico", "🔗 Grafo de conexiones"])
 
-if len(st.session_state.graph_points) > 0:
-    puntos_plot = st.session_state.graph_points.rename(columns={"lon": "lng"}).copy()
+# ---- TAB MAPA ----
+with tab_mapa:
+    col1, col2 = st.columns([1, 2])
 
-    nodes_layer = pdk.Layer(
-        "ScatterplotLayer",
-        data=puntos_plot,
-        get_position="[lng, lat]",
-        get_radius=90,
-        radius_min_pixels=4,
-        get_fill_color=RGB_NODES,
-        get_line_color=[0, 0, 0],
-        line_width_min_pixels=1,
-        pickable=True,
-    )
+    if len(st.session_state.graph_points) > 0:
+        puntos_plot = st.session_state.graph_points.rename(columns={"lon": "lng"}).copy()
 
-    edges_layer = pdk.Layer(
-        "PathLayer",
-        data=st.session_state.graph_edges,
-        get_path="path",
-        get_width=6,
-        width_scale=8,
-        get_color=RGB_PATH,
-        pickable=False,
-    )
-
-    center_lat = float(puntos_plot["lat"].mean())
-    center_lon = float(puntos_plot["lng"].mean())
-
-    view_state = pdk.ViewState(
-        latitude=center_lat,
-        longitude=center_lon,
-        zoom=14,
-        pitch=0
-    )
-
-    with col2:
-        st.pydeck_chart(
-            pdk.Deck(
-                layers=[edges_layer, nodes_layer],
-                initial_view_state=view_state,
-                tooltip={"text": "{nombre}\nLat: {lat}\nLon: {lng}"}
-            ),
-            use_container_width=True
-        )
-else:
-    # mapa vacío antes de cualquier ruta
-    view_state = pdk.ViewState(
-        latitude=BASE_LAT,
-        longitude=BASE_LON,
-        zoom=14,
-        pitch=0
-    )
-
-    with col2:
-        st.pydeck_chart(
-            pdk.Deck(
-                layers=[],
-                initial_view_state=view_state,
-            ),
-            use_container_width=True
+        nodes_layer = pdk.Layer(
+            "ScatterplotLayer",
+            data=puntos_plot,
+            get_position="[lng, lat]",
+            get_radius=90,
+            radius_min_pixels=4,
+            get_fill_color=RGB_NODES,
+            get_line_color=[0, 0, 0],
+            line_width_min_pixels=1,
+            pickable=True,
         )
 
-# ---------------- PANEL IZQUIERDO ----------------
-with col1:
-    if update_ok and last_tramo_df is not None:
-        st.subheader("Resumen")
-        st.markdown(f"**Origen:** {last_origen}")
-        st.markdown(f"**Destino:** {last_destino}")
-        st.markdown(f"**Distancia directa aprox.:** {last_dist_km:.2f} km")
-        st.markdown(f"**Tiempo aprox. (30 km/h):** {last_t_min:.1f} min")
-
-        st.download_button(
-            "📥 Descargar puntos (CSV)",
-            data=last_tramo_df.to_csv(index=False).encode("utf-8"),
-            file_name="puntos_directo.csv",
-            mime="text/csv"
+        edges_layer = pdk.Layer(
+            "PathLayer",
+            data=st.session_state.graph_edges,
+            get_path="path",
+            get_width=6,
+            width_scale=8,
+            get_color=RGB_PATH,
+            pickable=False,
         )
 
-        st.dataframe(last_tramo_df, use_container_width=True)
+        center_lat = float(puntos_plot["lat"].mean())
+        center_lon = float(puntos_plot["lng"].mean())
+
+        view_state = pdk.ViewState(
+            latitude=center_lat,
+            longitude=center_lon,
+            zoom=14,
+            pitch=0
+        )
+
+        with col2:
+            st.pydeck_chart(
+                pdk.Deck(
+                    layers=[edges_layer, nodes_layer],
+                    initial_view_state=view_state,
+                    tooltip={"text": "{nombre}\nLat: {lat}\nLon: {lng}"}
+                ),
+                use_container_width=True
+            )
     else:
-        st.info(
-            "1. Elegí Origen y Destino en la izquierda.\n"
-            "2. Dale 'Calcular ruta'.\n\n"
-            "Si un lugar no tiene coordenadas, se le generan solas.\n"
-            "Cada vez que calculás una ruta:\n"
-            "   • Se agrega el nodo al mapa.\n"
-            "   • Se dibuja la arista.\n"
-            "El mapa va guardando todo lo que hiciste en esta sesión."
+        # mapa vacío antes de cualquier ruta
+        view_state = pdk.ViewState(
+            latitude=BASE_LAT,
+            longitude=BASE_LON,
+            zoom=14,
+            pitch=0
         )
+
+        with col2:
+            st.pydeck_chart(
+                pdk.Deck(
+                    layers=[],
+                    initial_view_state=view_state,
+                ),
+                use_container_width=True
+            )
+
+    # ---------------- PANEL IZQUIERDO (INFO DE TRAMO) ----------------
+    with col1:
+        if update_ok and last_tramo_df is not None:
+            st.subheader("Resumen")
+            st.markdown(f"**Origen:** {last_origen}")
+            st.markdown(f"**Destino:** {last_destino}")
+            st.markdown(f"**Distancia directa aprox.:** {last_dist_km:.2f} km")
+            st.markdown(f"**Tiempo aprox. (30 km/h):** {last_t_min:.1f} min")
+
+            st.download_button(
+                "📥 Descargar puntos (CSV)",
+                data=last_tramo_df.to_csv(index=False).encode("utf-8"),
+                file_name="puntos_directo.csv",
+                mime="text/csv"
+            )
+
+            st.dataframe(last_tramo_df, use_container_width=True)
+        else:
+            st.info(
+                "1. Elegí Origen y Destino en la izquierda.\n"
+                "2. Dale 'Calcular ruta'.\n\n"
+                "Si un lugar no tiene coordenadas, se le generan solas.\n"
+                "Cada vez que calculás una ruta:\n"
+                "   • Se agrega el nodo al mapa.\n"
+                "   • Se dibuja la arista.\n"
+                "El mapa va guardando todo lo que hiciste en esta sesión."
+            )
+
+# ---- TAB GRAFO ----
+with tab_grafo:
+    st.markdown("### 🔎 Vista lógica de las conexiones")
+    st.caption(
+        "Esto NO es el mapa real: es una vista limpia tipo red. "
+        "Cada punto es una parada y cada línea es una conexión que ya calculaste."
+    )
+
+    fig_grafo = build_graph_figure(RGB_NODES, RGB_PATH)
+
+    if fig_grafo is None:
+        st.warning("Todavía no hay suficientes datos para dibujar el grafo. Calculá al menos una ruta 👇")
+    else:
+        st.plotly_chart(fig_grafo, use_container_width=True)
 
