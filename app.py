@@ -1,211 +1,242 @@
-<!DOCTYPE html>
-<html lang="es">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>San Marcos — Route Optimizer</title>
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-<style>
-  body { font-family: Arial, sans-serif; margin: 10px; }
-  #map { height: 500px; margin-top: 10px; }
-  select, button { margin: 5px; padding: 5px; }
-</style>
-</head>
-<body>
-<h2>San Marcos — Route Optimizer</h2>
+# app.py
+import math
+import requests
+import pandas as pd
+import pydeck as pdk
+import streamlit as st
 
-<label for="origen">Origen:</label>
-<select id="origen"></select>
+# ---------------- UI / CONFIG ----------------
+st.set_page_config(page_title="Rutas San Marcos", layout="wide")
+st.title("🚌 Calculador de paradas — San Marcos (modo sin grafo)")
 
-<label for="destino">Destino:</label>
-<select id="destino"></select>
+# ---------------- Datos base ----------------
+try:
+    nodos = pd.read_csv("nodos.csv")  # columnas: id, nombre, lat, lon
+except Exception:
+    nodos = pd.DataFrame(columns=["id", "nombre", "lat", "lon"])
 
-<label for="modo">Modo:</label>
-<select id="modo">
-  <option value="auto">Auto (40 km/h)</option>
-  <option value="bus">Bus (25 km/h)</option>
-  <option value="peaton">Peatón (5 km/h)</option>
-</select>
+LUGARES_NUEVOS = [
+    "Parque Central", "Catedral", "Terminal de Buses", "Hospital Regional",
+    "Cancha Los Angeles", "Cancha Sintetica Golazo", "Aeropuerto Nacional",
+    "Iglesia Candelero de Oro", "Centro de Salud", "Megapaca",
+    "CANICA (Casa de los Niños)", "Aldea San Rafael Soche", "Pollo Campero",
+    "INTECAP San Marcos", "Salón Quetzal", "SAT San Marcos", "Bazar Chino"
+]
 
-<button id="calcular">Calcular</button>
+# Normalización y columnas obligatorias
+for col in ["id", "nombre"]:
+    if col in nodos.columns:
+        nodos[col] = nodos[col].astype(str).str.strip()
 
-<p id="resultado"></p>
+for c in ["id", "nombre", "lat", "lon"]:
+    if c not in nodos.columns:
+        nodos[c] = None
+nodos = nodos[["id", "nombre", "lat", "lon"]]
 
-<div id="map"></div>
+# Asegurar que todos los lugares existan en 'nodos'
+def asegurar_lugares(df: pd.DataFrame, nombres: list) -> pd.DataFrame:
+    existentes = set(df["nombre"].astype(str).str.lower()) if "nombre" in df else set()
+    usados = set(df["id"].astype(str)) if "id" in df else set()
 
-<script>
-  var map = L.map('map').setView([14.965, -91.79], 14);
-  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-    maxZoom: 18,
-    attribution: '© OpenStreetMap contributors'
-  }).addTo(map);
+    def nuevo_id(start=1):
+        i = start
+        while True:
+            candidate = f"L{i}"
+            if candidate not in usados:
+                usados.add(candidate)
+                return candidate
+            i += 1
 
-  // Todos los nodos (anteriores + nuevos)
-  const nodos = [
-    { nombre: "Cancha Sintética Golazo", lat: 14.9675, lon: -91.7940 },
-    { nombre: "Bazar Chino", lat: 14.962, lon: -91.786 },
-    { nombre: "Aldea San Rafael Soche", lat: 14.9645, lon: -91.7935 },
-    { nombre: "Catedral", lat: 14.961, lon: -91.786 },
-    { nombre: "Centro de Salud", lat: 14.962, lon: -91.7885 },
-    { nombre: "INTECAP San Marcos", lat: 14.963, lon: -91.7885 },
-    { nombre: "Iglesia Candelero de Oro", lat: 14.9625, lon: -91.788 },
-    { nombre: "Megapaca", lat: 14.961, lon: -91.7905 },
-    { nombre: "Parque Central", lat: 14.9645, lon: -91.793 },
-    { nombre: "Pollo Campero", lat: 14.967, lon: -91.791 },
-    { nombre: "SAT San Marcos", lat: 14.969, lon: -91.7875 },
-    { nombre: "Terminal Central", lat: 14.9655, lon: -91.7938 },
-    { nombre: "Terminal de Buses", lat: 14.962, lon: -91.788 },
-    { nombre: "Universidad San Carlos", lat: 14.9712, lon: -91.7815 },
-    // Nodos nuevos
-    { nombre: "Gobernación San Marcos", lat: 14.966084, lon: -91.794452 },
-    { nombre: "DOWNTOWN CAFE Y DISCOTECA", lat: 14.964449, lon: -91.794986 },
-    { nombre: "Municipalidad de San Marcos", lat: 14.964601, lon: -91.793954 },
-    { nombre: "Centro universitario CUSAM", lat: 14.965126, lon: -91.799426 },
-    { nombre: "CLICOLOR", lat: 14.966102, lon: -91.799505 },
-    { nombre: "Fundap microcredito", lat: 14.962564, lon: -91.799215 },
-    { nombre: "ACREDICOM R. L", lat: 14.966154, lon: -91.793269 },
-    { nombre: "Banrural San Marcos", lat: 14.965649, lon: -91.795858 },
-    { nombre: "Hotel y Restaurante Santa Barbara", lat: 14.963654, lon: -91.796771 },
-    { nombre: "Salon Terracota", lat: 14.966691, lon: -91.797232 },
-    { nombre: "Contraloría General de Cuentas", lat: 14.966359, lon: -91.797010 },
-    { nombre: "Centro medico de especialidades", lat: 14.964610, lon: -91.797402 },
-    { nombre: "Cementerio San Marcos", lat: 14.964338, lon: -91.800597 },
-    { nombre: "Dominós pizza SM", lat: 14.963560, lon: -91.791470 },
-    { nombre: "Ministerio de Ambiente", lat: 14.963989, lon: -91.793348 },
-    { nombre: "Ministerio público de la Mujer", lat: 14.968695, lon: -91.798307 },
-    { nombre: "Guzgado de primera instancia", lat: 14.969025, lon: -91.797968 },
-    { nombre: "Edificio Tribunales", lat: 14.964409, lon: -91.794494 }
-  ];
+    filas = []
+    for nm in nombres:
+        if nm.lower() not in existentes:
+            filas.append({"id": nuevo_id(), "nombre": nm, "lat": None, "lon": None})
+    if filas:
+        df = pd.concat([df, pd.DataFrame(filas)], ignore_index=True)
+    return df
 
-  // Aristas (conecta cada nuevo nodo con el nodo más cercano para simplicidad)
-  const aristas = [
-    { desde: "Cancha Sintética Golazo", hasta: "Pollo Campero" },
-    { desde: "Cancha Sintética Golazo", hasta: "SAT San Marcos" },
-    { desde: "Pollo Campero", hasta: "Aldea San Rafael Soche" },
-    { desde: "Aldea San Rafael Soche", hasta: "Parque Central" },
-    { desde: "Parque Central", hasta: "INTECAP San Marcos" },
-    { desde: "INTECAP San Marcos", hasta: "Centro de Salud" },
-    { desde: "Centro de Salud", hasta: "Iglesia Candelero de Oro" },
-    { desde: "Catedral", hasta: "Bazar Chino" },
-    { desde: "Terminal Central", hasta: "Universidad San Carlos" },
-    { desde: "SAT San Marcos", hasta: "Universidad San Carlos" },
-    { desde: "Terminal de Buses", hasta: "INTECAP San Marcos" },
-    // Conexiones de nodos nuevos
-    { desde: "Gobernación San Marcos", hasta: "Cancha Sintética Golazo" },
-    { desde: "DOWNTOWN CAFE Y DISCOTECA", hasta: "Municipalidad de San Marcos" },
-    { desde: "Municipalidad de San Marcos", hasta: "Parque Central" },
-    { desde: "Centro universitario CUSAM", hasta: "CLICOLOR" },
-    { desde: "CLICOLOR", hasta: "Centro universitario CUSAM" },
-    { desde: "Fundap microcredito", hasta: "Centro medico de especialidades" },
-    { desde: "ACREDICOM R. L", hasta: "Gobernación San Marcos" },
-    { desde: "Banrural San Marcos", hasta: "Pollo Campero" },
-    { desde: "Hotel y Restaurante Santa Barbara", hasta: "Fundap microcredito" },
-    { desde: "Salon Terracota", hasta: "Contraloría General de Cuentas" },
-    { desde: "Contraloría General de Cuentas", hasta: "Salon Terracota" },
-    { desde: "Centro medico de especialidades", hasta: "DOWNTOWN CAFE Y DISCOTECA" },
-    { desde: "Cementerio San Marcos", hasta: "Centro universitario CUSAM" },
-    { desde: "Dominós pizza SM", hasta: "Centro de Salud" },
-    { desde: "Ministerio de Ambiente", hasta: "INTECAP San Marcos" },
-    { desde: "Ministerio público de la Mujer", hasta: "Guzgado de primera instancia" },
-    { desde: "Guzgado de primera instancia", hasta: "Universidad San Carlos" },
-    { desde: "Edificio Tribunales", hasta: "Municipalidad de San Marcos" }
-  ];
+nodos = asegurar_lugares(nodos, LUGARES_NUEVOS)
 
-  // Función distancia Haversine
-  function calcularDistancia(lat1, lon1, lat2, lon2) {
-    const R = 6371;
-    const dLat = (lat2-lat1)*Math.PI/180;
-    const dLon = (lon2-lon1)*Math.PI/180;
-    const a = Math.sin(dLat/2)**2 + Math.cos(lat1*Math.PI/180)*Math.cos(lat2*Math.PI/180)*Math.sin(dLon/2)**2;
-    const c = 2*Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
-    return R*c;
-  }
+# Memoria (para editar coordenadas sin tocar CSV)
+if "nodos_mem" not in st.session_state:
+    st.session_state.nodos_mem = nodos.copy()
+nodos = st.session_state.nodos_mem
 
-  // Construir grafo con pesos
-  const grafo = {};
-  nodos.forEach(n => grafo[n.nombre]=[]);
-  aristas.forEach(a=>{
-    const n1=nodos.find(n=>n.nombre===a.desde);
-    const n2=nodos.find(n=>n.nombre===a.hasta);
-    const dist=calcularDistancia(n1.lat,n1.lon,n2.lat,n2.lon);
-    grafo[a.desde].push({nodo:a.hasta,peso:dist});
-    grafo[a.hasta].push({nodo:a.desde,peso:dist});
-    L.polyline([[n1.lat,n1.lon],[n2.lat,n2.lon]],{color:"lightblue",weight:2}).addTo(map);
-  });
+# ---------------- Helpers ----------------
+def hex_to_rgb(h: str):
+    h = h.lstrip("#")
+    return [int(h[i:i+2], 16) for i in (0, 2, 4)]
 
-  // Marcadores
-  nodos.forEach(n=>{
-    L.circleMarker([n.lat,n.lon],{radius:6,color:"blue",fillColor:"cyan",fillOpacity:0.8})
-      .addTo(map).bindPopup(`<b>${n.nombre}</b>`);
-  });
+def haversine_km(a_lat, a_lon, b_lat, b_lon):
+    R = 6371.0
+    lat1, lon1 = math.radians(a_lat), math.radians(a_lon)
+    lat2, lon2 = math.radians(b_lat), math.radians(b_lon)
+    dlat, dlon = lat2 - lat1, lon2 - lon1
+    h = math.sin(dlat/2)**2 + math.cos(lat1)*math.cos(lat2)*math.sin(dlon/2)**2
+    return 2 * R * math.asin(math.sqrt(h))
 
-  // Llena selects
-  const origenSelect=document.getElementById("origen");
-  const destinoSelect=document.getElementById("destino");
-  nodos.forEach(n=>{
-    const opt1=document.createElement("option"); opt1.value=n.nombre; opt1.text=n.nombre;
-    const opt2=opt1.cloneNode(true);
-    origenSelect.appendChild(opt1);
-    destinoSelect.appendChild(opt2);
-  });
+def tiene_coords(row) -> bool:
+    return pd.notna(row["lat"]) and pd.notna(row["lon"])
 
-  // Dijkstra
-  function dijkstra(grafo,inicio,fin){
-    const dist={}; const prev={}; const Q=new Set();
-    for(let nodo in grafo){ dist[nodo]=Infinity; prev[nodo]=null; Q.add(nodo);}
-    dist[inicio]=0;
-    while(Q.size>0){
-      let u=Array.from(Q).reduce((a,b)=>dist[a]<dist[b]?a:b);
-      Q.delete(u);
-      if(u===fin) break;
-      grafo[u].forEach(v=>{
-        const alt=dist[u]+v.peso;
-        if(alt<dist[v.nodo]){dist[v.nodo]=alt; prev[v.nodo]=u;}
-      });
-    }
-    const path=[]; let u=fin;
-    if(prev[u]||u===inicio){while(u){path.unshift(u); u=prev[u];}}
-    return path;
-  }
+def osrm_route(o_lat, o_lon, d_lat, d_lon):
+    """
+    Devuelve: (path_lonlat, dist_km, dur_min) o (None, None, None) si falla.
+    path_lonlat: lista [[lon, lat], ...] siguiendo la calle.
+    """
+    url = (
+        f"https://router.project-osrm.org/route/v1/driving/"
+        f"{o_lon},{o_lat};{d_lon},{d_lat}?overview=full&geometries=geojson"
+    )
+    try:
+        r = requests.get(url, timeout=12)
+        r.raise_for_status()
+        data = r.json()
+        coords = data["routes"][0]["geometry"]["coordinates"]  # [lon, lat]
+        dist_km = data["routes"][0]["distance"] / 1000.0
+        dur_min = data["routes"][0]["duration"] / 60.0
+        return coords, dist_km, dur_min
+    except Exception:
+        return None, None, None
 
-  document.getElementById("calcular").onclick=function(){
-    const origen=origenSelect.value;
-    const destino=destinoSelect.value;
-    const modo=document.getElementById("modo").value;
-    if(!origen||!destino){alert("Selecciona origen y destino");return;}
-    // Borra rutas anteriores
-    map.eachLayer(layer=>{if(layer instanceof L.Polyline&&!layer._url) map.removeLayer(layer);});
-    // Re-dibuja aristas
-    aristas.forEach(a=>{
-      const n1=nodos.find(n=>n.nombre===a.desde);
-      const n2=nodos.find(n=>n.nombre===a.hasta);
-      L.polyline([[n1.lat,n1.lon],[n2.lat,n2.lon]],{color:"lightblue",weight:2}).addTo(map);
-    });
-    const ruta=dijkstra(grafo,origen,destino);
-    if(ruta.length===0){alert("No hay ruta");return;}
-    // Dibuja ruta resaltada
-    for(let i=0;i<ruta.length-1;i++){
-      const n1=nodos.find(n=>n.nombre===ruta[i]);
-      const n2=nodos.find(n=>n.nombre===ruta[i+1]);
-      L.polyline([[n1.lat,n1.lon],[n2.lat,n2.lon]],{color:"red",weight:4}).addTo(map);
-    }
-    // Distancia y tiempo
-    let distanciaTotal=0;
-    for(let i=0;i<ruta.length-1;i++){
-      const n1=nodos.find(n=>n.nombre===ruta[i]);
-      const n2=nodos.find(n=>n.nombre===ruta[i+1]);
-      distanciaTotal+=calcularDistancia(n1.lat,n1.lon,n2.lat,n2.lon);
-    }
-    let velocidad;
-    if(modo==="auto") velocidad=40;
-    else if(modo==="bus") velocidad=25;
-    else velocidad=5;
-    const tiempo=distanciaTotal/velocidad;
-    document.getElementById("resultado").innerHTML=
-      `Ruta: ${ruta.join(" → ")} <br>Distancia: ${distanciaTotal.toFixed(2)} km <br>Tiempo estimado: ${tiempo.toFixed(2)} h`;
-  };
+def fit_view_from_lonlat(coords_lonlat: list, extra_zoom_out: float = 0.35):
+    """
+    Calcula un ViewState que encuadra todas las coordenadas (lon,lat) usando
+    pdk.data_utils.compute_view y aplica un pequeño padding con 'extra_zoom_out'.
+    """
+    if not coords_lonlat:
+        # fallback a San Marcos aprox.
+        return pdk.ViewState(latitude=14.965, longitude=-91.79, zoom=13)
+    df_bounds = pd.DataFrame(coords_lonlat, columns=["lon", "lat"])
+    view = pdk.data_utils.compute_view(df_bounds[["lon", "lat"]])
+    # padding pequeño para que no corte los extremos
+    view["zoom"] = max(1, view["zoom"] - extra_zoom_out)
+    return pdk.ViewState(**view, pitch=0, bearing=0)
 
-</script>
-</body>
-</html>
+# ---------------- SIDEBAR ----------------
+with st.sidebar:
+    st.header("Parámetros")
+
+    origen_nombre = st.selectbox("Origen", sorted(nodos["nombre"]))
+    destino_nombre = st.selectbox("Destino", sorted(nodos["nombre"]), index=1)
+
+    st.markdown("### Visualización")
+    show_nodes = st.toggle("Mostrar nodos", value=False)  # por defecto ocultos
+    col_nodes = st.color_picker("Color de nodos", "#FF007F")
+    col_path  = st.color_picker("Color de ruta", "#007AFF")
+    usar_osrm = st.toggle("Ruta real por calle (OSRM)", value=True)
+
+    st.markdown("---")
+    st.markdown("### Agregar/editar coordenadas del lugar seleccionado")
+
+    def editor_de_coords(etiqueta, nombre_sel):
+        fila = nodos.loc[nodos["nombre"] == nombre_sel].iloc[0]
+        col1, col2 = st.columns(2)
+        with col1:
+            lat_txt = st.text_input(
+                f"Lat ({etiqueta})",
+                value="" if pd.isna(fila["lat"]) else str(fila["lat"]),
+                key=f"lat_{etiqueta}",
+            )
+        with col2:
+            lon_txt = st.text_input(
+                f"Lon ({etiqueta})",
+                value="" if pd.isna(fila["lon"]) else str(fila["lon"]),
+                key=f"lon_{etiqueta}",
+            )
+        if st.button(f"Guardar coords de {etiqueta}"):
+            try:
+                lat = float(str(lat_txt).replace(",", "."))
+                lon = float(str(lon_txt).replace(",", "."))
+                st.session_state.nodos_mem.loc[nodos["nombre"] == nombre_sel, ["lat", "lon"]] = [lat, lon]
+                st.success(f"Coordenadas guardadas para {nombre_sel}: ({lat}, {lon})")
+            except ValueError:
+                st.error("Lat/Lon inválidos. Usa números (ej. 14.9712 y -91.7815)")
+
+    editor_de_coords("Origen", origen_nombre)
+    editor_de_coords("Destino", destino_nombre)
+
+# ---------------- MAPA ----------------
+RGB_NODES = hex_to_rgb(col_nodes)
+RGB_PATH  = hex_to_rgb(col_path)
+
+# Capa de nodos (solo los que ya tengan coordenadas)
+nodos_plot = nodos.dropna(subset=["lat", "lon"]).copy()
+nodos_plot.rename(columns={"lon": "lng"}, inplace=True)
+
+layers = []
+if show_nodes and not nodos_plot.empty:
+    nodes_layer = pdk.Layer(
+        "ScatterplotLayer",
+        data=nodos_plot,
+        get_position="[lng, lat]",
+        get_radius=65,
+        radius_min_pixels=3,
+        get_fill_color=RGB_NODES,
+        get_line_color=[30, 30, 30],
+        line_width_min_pixels=1,
+        pickable=False,
+    )
+    layers.append(nodes_layer)
+
+# Obtener filas origen/destino
+fila_o = nodos.loc[nodos["nombre"] == origen_nombre].iloc[0]
+fila_d = nodos.loc[nodos["nombre"] == destino_nombre].iloc[0]
+
+# Si hay coords en ambos, dibujar ruta automáticamente
+if tiene_coords(fila_o) and tiene_coords(fila_d):
+    o_lat, o_lon = float(fila_o["lat"]), float(fila_o["lon"])
+    d_lat, d_lon = float(fila_d["lat"]), float(fila_d["lon"])
+
+    path_lonlat, dist_km, dur_min = (None, None, None)
+    if usar_osrm:
+        path_lonlat, dist_km, dur_min = osrm_route(o_lat, o_lon, d_lat, d_lon)
+
+    # Fallback: línea recta
+    if path_lonlat is None:
+        dist_km = haversine_km(o_lat, o_lon, d_lat, d_lon)
+        vel_kmh = 30.0
+        dur_min = (dist_km / vel_kmh) * 60.0
+        path_lonlat = [[o_lon, o_lat], [d_lon, d_lat]]
+
+    # Capa de camino
+    path_layer = pdk.Layer(
+        "PathLayer",
+        data=[{"path": path_lonlat}],
+        get_path="path",
+        get_width=6,
+        width_scale=8,
+        get_color=RGB_PATH,
+        pickable=False,
+    )
+    layers.append(path_layer)
+
+    # Zoom/encuadre automático a la ruta
+    view_state = fit_view_from_lonlat(path_lonlat, extra_zoom_out=0.45)
+
+    col1, col2 = st.columns([1, 2])
+    with col1:
+        st.subheader("Resumen")
+        st.markdown(f"**Origen:** {origen_nombre}")
+        st.markdown(f"**Destino:** {destino_nombre}")
+        st.markdown(f"**Distancia aprox.:** {dist_km:.2f} km")
+        st.markdown(f"**Tiempo aprox.:** {dur_min:.1f} min")
+        export_df = pd.DataFrame(path_lonlat, columns=["lon", "lat"])
+        st.download_button(
+            "📥 Descargar ruta (CSV)",
+            data=export_df.to_csv(index=False).encode("utf-8"),
+            file_name="ruta.csv",
+            mime="text/csv",
+        )
+    with col2:
+        st.pydeck_chart(pdk.Deck(layers=layers, initial_view_state=view_state), use_container_width=True)
+
+else:
+    # Sin ruta: si hay nodos visibles, encuadra esos; si no, fallback a centro
+    if show_nodes and not nodos_plot.empty:
+        coords = nodos_plot[["lng", "lat"]].values.tolist()
+        view_state = fit_view_from_lonlat(coords, extra_zoom_out=0.25)
+    else:
+        view_state = pdk.ViewState(latitude=14.965, longitude=-91.79, zoom=13)
+
+    st.info("Selecciona origen y destino, y asigna lat/lon a ambos en la barra lateral. La ruta se dibuja automáticamente.")
+    st.pydeck_chart(pdk.Deck(layers=layers, initial_view_state=view_state), use_container_width=True)
