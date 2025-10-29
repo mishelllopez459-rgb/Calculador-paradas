@@ -122,7 +122,7 @@ def osrm_route(o_lat, o_lon, d_lat, d_lon):
 
 def fit_view_from_lonlat(coords_lonlat: list, extra_zoom_out: float = 0.4):
     """
-    Encuadra todos los puntos dados.
+    Encuadra todos los puntos dados en el mapa.
     """
     if not coords_lonlat:
         return pdk.ViewState(
@@ -136,7 +136,6 @@ def fit_view_from_lonlat(coords_lonlat: list, extra_zoom_out: float = 0.4):
     df_bounds = pd.DataFrame(coords_lonlat, columns=["lon","lat"])
     raw_view = pdk.data_utils.compute_view(df_bounds[["lon","lat"]])
 
-    # pydeck puede dar dict o ViewState
     if isinstance(raw_view, dict):
         lat_c = raw_view.get("latitude", 14.965)
         lon_c = raw_view.get("longitude", -91.79)
@@ -168,8 +167,8 @@ def build_weighted_graph(aristas_df: pd.DataFrame, nodos_df: pd.DataFrame, dirig
     weights[(u,v)] = {"time": t_min, "dist": d_km}
 
     Reglas:
-    - Si 'peso' existe en la arista => lo usamos como tiempo_min (en minutos).
-    - Si no hay 'peso', calculamos distancia haversine y de ahí tiempo usando VEL_KMH.
+    - Si 'peso' está en la arista => lo usamos como tiempo_min directo (min).
+    - Si no hay 'peso', calculamos distancia haversine y de ahí tiempo con VEL_KMH.
     - Si faltan coords => fallback distancia 0.6 km / tiempo 3.0 min.
     """
     graph = defaultdict(list)
@@ -406,26 +405,7 @@ def nombre_a_id(nodos_df, nombre):
 origen_id  = nombre_a_id(nodos, origen_nombre)
 destino_id = nombre_a_id(nodos, destino_nombre)
 
-graph, weights = build_weighted_graph(aristas_raw, nodos, dirigido_flag)
-
-use_metric = "time" if criterio_radio == "tiempo_min" else "dist"
-path_ids, _cost_used = dijkstra(graph, origen_id, destino_id, use=use_metric)
-
-# sumar métricas reales de la ruta elegida (tiempo total y distancia total)
-if len(path_ids) >= 2:
-    total_time = 0.0
-    total_dist = 0.0
-    for i in range(len(path_ids) - 1):
-        u = path_ids[i]
-        v = path_ids[i + 1]
-        w = weights.get((u, v), {"time": 3.0, "dist": 0.6})
-        total_time += float(w["time"])
-        total_dist += float(w["dist"])
-else:
-    total_time = None
-    total_dist = None
-
-# filas origen/destino para OSRM y fallback recta
+# filas origen/destino (para coords directas)
 if origen_id in set(nodos["id"]):
     fila_o = nodos.loc[nodos["id"] == origen_id].iloc[0]
 else:
@@ -435,38 +415,91 @@ if destino_id in set(nodos["id"]):
 else:
     fila_d = pd.Series({"lat": None, "lon": None})
 
-# polyline por paradas del grafo
+# construir grafo con pesos
+graph, weights = build_weighted_graph(aristas_raw, nodos, dirigido_flag)
+
+# elegir métrica a optimizar
+use_metric = "time" if criterio_radio == "tiempo_min" else "dist"
+
+# intentar ruta en el grafo
+path_ids, _cost_used = dijkstra(graph, origen_id, destino_id, use=use_metric)
+
+# ⬇⬇⬇ ARREGLO CLAVE: si no hay ruta en el grafo, forzamos origen→destino directo
+if len(path_ids) < 2:
+    path_ids = []
+    if origen_id is not None:
+        path_ids.append(origen_id)
+    if destino_id is not None and destino_id != origen_id:
+        path_ids.append(destino_id)
+
+# ahora calculamos métricas totales
+total_time = 0.0
+total_dist = 0.0
+if len(path_ids) >= 2:
+    have_any_weight = False
+    for i in range(len(path_ids) - 1):
+        u = path_ids[i]
+        v = path_ids[i + 1]
+        if (u, v) in weights:
+            w = weights[(u, v)]
+            total_time += float(w["time"])
+            total_dist += float(w["dist"])
+            have_any_weight = True
+        else:
+            # no hay arista en el grafo (caso forzado directo)
+            # calculamos directo por haversine si hay coords
+            if u in set(nodos["id"]) and v in set(nodos["id"]):
+                arow = nodos.loc[nodos["id"] == u].iloc[0]
+                brow = nodos.loc[nodos["id"] == v].iloc[0]
+                if tiene_coords(arow) and tiene_coords(brow):
+                    d_km_seg = haversine_km(
+                        float(arow["lat"]), float(arow["lon"]),
+                        float(brow["lat"]), float(brow["lon"]),
+                    )
+                    t_min_seg = (d_km_seg / VEL_KMH) * 60.0
+                    total_time += t_min_seg
+                    total_dist += d_km_seg
+                    have_any_weight = True
+    if not have_any_weight:
+        # si ni eso, dejamos en None
+        total_time = None
+        total_dist = None
+else:
+    total_time = None
+    total_dist = None
+
+# polyline por paradas en el grafo (solo nodos con coords)
 ruta_por_paradas = ids_a_polyline_lonlat(nodos, path_ids)
 
-# polyline recta O->D por si no hay coords intermedias
+# polyline recta O->D (fallback duro)
 ruta_recta = []
 if tiene_coords(fila_o) and tiene_coords(fila_d):
     ruta_recta = [
         [float(fila_o["lon"]), float(fila_o["lat"])],
         [float(fila_d["lon"]), float(fila_d["lat"])],
     ]
-    # si no había totales, calcúlalos con la recta
+    # si no pudimos calcular totales arriba, calculamos con recta
     if total_time is None or total_dist is None:
-        line_km = haversine_km(
+        d_line_km = haversine_km(
             float(fila_o["lat"]), float(fila_o["lon"]),
             float(fila_d["lat"]), float(fila_d["lon"]),
         )
-        total_dist = line_km
-        total_time = (line_km / VEL_KMH) * 60.0 if line_km is not None else None
+        total_dist = d_line_km
+        total_time = (d_line_km / VEL_KMH) * 60.0 if d_line_km is not None else None
 
-# intento OSRM (ruta real por calle)
+# OSRM entre origen y destino (solo si ambos tienen coords y toggle encendido)
 ruta_osrm, dist_osrm, dur_osrm = (None, None, None)
 if usar_osrm and tiene_coords(fila_o) and tiene_coords(fila_d):
     ruta_osrm, dist_osrm, dur_osrm = osrm_route(
         float(fila_o["lat"]), float(fila_o["lon"]),
         float(fila_d["lat"]), float(fila_d["lon"]),
     )
-    # si OSRM devolvió buenos valores, usamos esos como costo/distancia mostrada
+    # si OSRM regresó bien, lo usamos como distancia/tiempo final
     if ruta_osrm and dist_osrm is not None and dur_osrm is not None:
         total_dist = dist_osrm
         total_time = dur_osrm
 
-# polyline final a dibujar
+# elegir qué dibujar en el mapa como ruta_final
 if ruta_osrm:
     ruta_final = ruta_osrm
 elif ruta_por_paradas and len(ruta_por_paradas) >= 2:
@@ -484,27 +517,27 @@ RGB_PATH  = hex_to_rgb(color_path)
 layers = []
 all_coords = []
 
-# nodos (puntos)
+# nodos
 layer_nodes, nodos_plot = capa_nodos(nodos, RGB_NODES)
 if layer_nodes is not None:
     layers.append(layer_nodes)
     if not nodos_plot.empty:
         all_coords.extend(nodos_plot[["lng","lat"]].values.tolist())
 
-# red general (todas las aristas)
+# TODA la red en blanco
 layer_edges, edges_paths = capa_aristas(aristas_raw, nodos, RGB_EDGES, width_px=3)
 if layer_edges is not None:
     layers.append(layer_edges)
     for seg in edges_paths:
         all_coords.extend(seg["path"])
 
-# ruta seleccionada (arriba, más gruesa)
+# ruta seleccionada más gruesa
 layer_route = capa_ruta(ruta_final, RGB_PATH, width_px=6)
 if layer_route is not None:
     layers.append(layer_route)
     all_coords.extend(ruta_final)
 
-# vista inicial del mapa
+# vista inicial (zoom/centro auto)
 view_state = fit_view_from_lonlat(all_coords, extra_zoom_out=0.4)
 
 # =========================
@@ -547,7 +580,7 @@ else:
     else:
         st.markdown(f"**Tiempo aprox.:** —")
 
-# botón para bajar CSV
+# CSV de la ruta dibujada
 if ruta_final and len(ruta_final) >= 2:
     export_df = pd.DataFrame(ruta_final, columns=["lon","lat"])
     st.download_button(
