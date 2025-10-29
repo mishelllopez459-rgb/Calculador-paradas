@@ -12,7 +12,7 @@ st.set_page_config(page_title="Rutas San Marcos", layout="wide")
 # =========================
 # CONSTANTES
 # =========================
-VEL_KMH = 30.0  # velocidad promedio asumida (km/h) si no hay OSRM
+VEL_KMH = 30.0  # km/h asumidos si no hay OSRM
 CENTER_LAT = 14.965
 CENTER_LON = -91.79
 
@@ -42,9 +42,8 @@ def tiene_coords(fila) -> bool:
 
 def osrm_route(o_lat, o_lon, d_lat, d_lon):
     """
-    Devuelve (coords_lonlat, dist_km, dur_min) usando OSRM público.
+    Devuelve (coords_lonlat, dist_km, dur_min) con OSRM.
     coords_lonlat = [[lon,lat], ...]
-    Si falla: (None, None, None)
     """
     url = (
         "https://router.project-osrm.org/route/v1/driving/"
@@ -54,7 +53,7 @@ def osrm_route(o_lat, o_lon, d_lat, d_lon):
         r = requests.get(url, timeout=12)
         r.raise_for_status()
         data = r.json()
-        coords  = data["routes"][0]["geometry"]["coordinates"]  # [[lon,lat], ...]
+        coords  = data["routes"][0]["geometry"]["coordinates"]
         dist_km = data["routes"][0]["distance"] / 1000.0
         dur_min = data["routes"][0]["duration"] / 60.0
         return coords, dist_km, dur_min
@@ -62,9 +61,6 @@ def osrm_route(o_lat, o_lon, d_lat, d_lon):
         return None, None, None
 
 def fit_view_from_lonlat(coords_lonlat, extra_zoom_out=0.4):
-    """
-    Encuadra todo en el mapa.
-    """
     if not coords_lonlat:
         return pdk.ViewState(
             latitude=CENTER_LAT,
@@ -99,7 +95,7 @@ def fit_view_from_lonlat(coords_lonlat, extra_zoom_out=0.4):
     )
 
 # =========================
-# CARGA nodos.csv y aristas.csv
+# CARGA CSVs
 # =========================
 def cargar_nodos():
     try:
@@ -122,7 +118,7 @@ def cargar_nodos():
 
     df = df[["id","nombre","lat","lon"]]
 
-    # asegurar que salgan lugares conocidos en dropdown aunque no tengan coords
+    # meter lugares conocidos aunque no tengan coords todavía
     LUGARES_NUEVOS = [
         "Parque Central","Catedral","Terminal de Buses","Hospital Regional",
         "Cancha Los Angeles","Cancha Sintetica Golazo","Aeropuerto Nacional",
@@ -170,12 +166,12 @@ def cargar_aristas():
 
     return df[["origen","destino","peso"]]
 
-nodos = cargar_nodos()
+nodos_base = cargar_nodos()
 aristas = cargar_aristas()
 
-# mantener nodos en sesión si luego quieres editar coords en otra versión
+# memoria editable en sesión
 if "nodos_mem" not in st.session_state:
-    st.session_state.nodos_mem = nodos.copy()
+    st.session_state.nodos_mem = nodos_base.copy()
 nodos = st.session_state.nodos_mem
 
 # =========================
@@ -184,42 +180,98 @@ nodos = st.session_state.nodos_mem
 with st.sidebar:
     st.markdown("### Parámetros")
 
-    # (mantenemos el toggle del grafo dirigido solo por UI,
-    # ya no afecta el cálculo de ruta directa)
     dirigido_flag = st.checkbox(
         "Tramos unidireccionales (grafo dirigido)",
         value=False,
-        help="(Solo visual / referencia del grafo)"
+        help="(solo informativo, la ruta es directa Origen→Destino)"
     )
 
     origen_nombre = st.selectbox(
         "Origen",
-        sorted(nodos["nombre"].astype(str))
+        sorted(nodos["nombre"].astype(str)),
+        key="origen_sel"
     )
     destino_nombre = st.selectbox(
         "Destino",
         sorted(nodos["nombre"].astype(str)),
         index=1 if len(nodos) > 1 else 0,
+        key="destino_sel"
     )
 
     criterio_radio = st.radio(
         "Optimizar por",
         ["tiempo_min", "distancia_km"],
         index=0,
-        help="Solo para mostrar qué métrica te importa más en el resumen."
+        help="Solo afecta cómo se enseña el resumen.",
+        key="criterio_sel"
     )
 
     st.markdown("### Colores")
-    color_nodes = st.color_picker("Nodos (puntos)", "#FF008C")        # rosa
-    color_edges = st.color_picker("Red general (aristas)", "#FFFFFF") # blanco
-    color_path  = st.color_picker("Ruta seleccionada", "#00B2FF")     # celeste
+    color_nodes = st.color_picker("Nodos (puntos)", "#FF008C", key="col_nodes")
+    color_edges = st.color_picker("Red general (aristas)", "#FFFFFF", key="col_edges")
+    color_path  = st.color_picker("Ruta seleccionada", "#00B2FF", key="col_path")
 
-    usar_osrm   = st.toggle("Ruta real por calle (OSRM)", value=True)
+    usar_osrm   = st.toggle("Ruta real por calle (OSRM)", value=True, key="usar_osrm")
 
-    st.button("Calcular ruta")  # decorativo, se recalcula solo
+    st.markdown("---")
+    st.markdown("### Editar coordenadas")
+    # editor para ORIGEN
+    fila_o_tmp = nodos.loc[nodos["nombre"] == origen_nombre].iloc[0]
+    lat_o_txt = st.text_input(
+        "Lat Origen",
+        value="" if pd.isna(fila_o_tmp["lat"]) else str(fila_o_tmp["lat"]),
+        key="lat_origen_edit"
+    )
+    lon_o_txt = st.text_input(
+        "Lon Origen",
+        value="" if pd.isna(fila_o_tmp["lon"]) else str(fila_o_tmp["lon"]),
+        key="lon_origen_edit"
+    )
+
+    # editor para DESTINO
+    fila_d_tmp = nodos.loc[nodos["nombre"] == destino_nombre].iloc[0]
+    lat_d_txt = st.text_input(
+        "Lat Destino",
+        value="" if pd.isna(fila_d_tmp["lat"]) else str(fila_d_tmp["lat"]),
+        key="lat_destino_edit"
+    )
+    lon_d_txt = st.text_input(
+        "Lon Destino",
+        value="" if pd.isna(fila_d_tmp["lon"]) else str(fila_d_tmp["lon"]),
+        key="lon_destino_edit"
+    )
+
+    if st.button("💾 Guardar coords (Origen y Destino)"):
+        def try_float(x):
+            if x is None or x == "":
+                return None
+            return float(str(x).replace(",", "."))
+        try:
+            new_lat_o = try_float(lat_o_txt)
+            new_lon_o = try_float(lon_o_txt)
+            new_lat_d = try_float(lat_d_txt)
+            new_lon_d = try_float(lon_d_txt)
+
+            st.session_state.nodos_mem.loc[
+                st.session_state.nodos_mem["nombre"] == origen_nombre, ["lat","lon"]
+            ] = [new_lat_o, new_lon_o]
+
+            st.session_state.nodos_mem.loc[
+                st.session_state.nodos_mem["nombre"] == destino_nombre, ["lat","lon"]
+            ] = [new_lat_d, new_lon_d]
+
+            st.success("Coordenadas guardadas ✅. Se recalculó la ruta.")
+        except Exception:
+            st.error("Coordenadas inválidas. Usa números como 14.9652 y -91.7899")
+
+    st.markdown("---")
+    st.button("Calcular ruta", help="Se recalcula solo al cambiar algo")
+
+# tras guardar, refrescamos nodos usados abajo
+nodos = st.session_state.nodos_mem
 
 # =========================
-# TOMAR FILAS ORIGEN / DESTINO
+# TOMAR ORIGEN / DESTINO ACTUALIZADOS
 # =========================
 fila_o_df = nodos.loc[nodos["nombre"] == origen_nombre]
 fila_d_df = nodos.loc[nodos["nombre"] == destino_nombre]
@@ -228,10 +280,9 @@ fila_o = fila_o_df.iloc[0] if not fila_o_df.empty else None
 fila_d = fila_d_df.iloc[0] if not fila_d_df.empty else None
 
 # =========================
-# CALCULAR RUTA DIRECTA ENTRE ORIGEN Y DESTINO
-# (SIEMPRE. ESTO ES LO QUE ME PEDISTE)
+# CALCULAR RUTA DIRECTA O->D
 # =========================
-ruta_final = []   # [[lon,lat], ...] para dibujar PathLayer
+ruta_final = []
 dist_km    = 0.0
 dur_min    = 0.0
 warning_msg = None
@@ -240,20 +291,17 @@ if tiene_coords(fila_o) and tiene_coords(fila_d):
     o_lat, o_lon = float(fila_o["lat"]), float(fila_o["lon"])
     d_lat, d_lon = float(fila_d["lat"]), float(fila_d["lon"])
 
-    # 1) Intentar OSRM si está activo
     if usar_osrm:
-        osrm_coords, osrm_dist, osrm_time = osrm_route(o_lat, o_lon, d_lat, d_lon)
-        if osrm_coords is not None:
-            ruta_final = osrm_coords
-            dist_km    = osrm_dist
-            dur_min    = osrm_time
+        r_coords, r_dist, r_time = osrm_route(o_lat, o_lon, d_lat, d_lon)
+        if r_coords is not None:
+            ruta_final = r_coords
+            dist_km    = r_dist
+            dur_min    = r_time
         else:
-            # fallback: línea recta
             ruta_final = [[o_lon, o_lat], [d_lon, d_lat]]
             dist_km    = haversine_km(o_lat, o_lon, d_lat, d_lon)
             dur_min    = (dist_km / VEL_KMH) * 60.0
     else:
-        # sin OSRM: línea recta
         ruta_final = [[o_lon, o_lat], [d_lon, d_lat]]
         dist_km    = haversine_km(o_lat, o_lon, d_lat, d_lon)
         dur_min    = (dist_km / VEL_KMH) * 60.0
@@ -261,8 +309,9 @@ else:
     warning_msg = "No se puede calcular la ruta: falta lat/lon en Origen o Destino."
 
 # =========================
-# CAPA NODOS (Scatter)
+# CAPAS MAPA
 # =========================
+# nodos visibles (rosa)
 nodos_plot = nodos.dropna(subset=["lat","lon"]).copy()
 nodos_plot.rename(columns={"lon": "lng"}, inplace=True)
 
@@ -280,9 +329,7 @@ if not nodos_plot.empty:
         pickable=True,
     )
 
-# =========================
-# CAPA ARISTAS (toda la red blanca fina)
-# =========================
+# aristas blancas finas (grafo visual)
 idx_coords = nodos.set_index("id")[["lat","lon"]]
 edge_segments = []
 for _, r in aristas.iterrows():
@@ -313,9 +360,7 @@ if edge_segments:
         pickable=False,
     )
 
-# =========================
-# CAPA RUTA (azul gruesa)
-# =========================
+# ruta azul gruesa
 layer_route = None
 if len(ruta_final) >= 2:
     layer_route = pdk.Layer(
@@ -328,23 +373,16 @@ if len(ruta_final) >= 2:
         pickable=False,
     )
 
-# =========================
-# VIEWSTATE (zoom y centro)
-# =========================
+# build view state
 all_coords_for_view = []
 if not nodos_plot.empty:
     all_coords_for_view.extend(nodos_plot[["lng","lat"]].values.tolist())
-if len(edge_segments) > 0:
-    for seg in edge_segments:
-        all_coords_for_view.extend(seg["path"])
-if len(ruta_final) > 0:
-    all_coords_for_view.extend(ruta_final)
+for seg in edge_segments:
+    all_coords_for_view.extend(seg["path"])
+all_coords_for_view.extend(ruta_final)
 
 view_state = fit_view_from_lonlat(all_coords_for_view, extra_zoom_out=0.4)
 
-# =========================
-# ARMAR LAYERS PARA EL MAPA
-# =========================
 layers = []
 if layer_nodes is not None:
     layers.append(layer_nodes)
@@ -364,11 +402,9 @@ st.markdown(f"**Destino:** {destino_nombre}")
 st.markdown(f"**Criterio:** `{criterio_radio}`")
 st.markdown(f"**Grafo:** {'Dirigido' if dirigido_flag else 'No dirigido'}")
 
-# en este modo simple, siempre son solo 2 paradas (origen/destino)
 st.markdown("**Paradas (incluye origen y destino):** 2")
 st.markdown("**Paradas intermedias:** 0")
 
-# mostramos distancia / tiempo
 if len(ruta_final) >= 2:
     if criterio_radio == "tiempo_min":
         st.markdown(f"**Costo total (tiempo_min):** {dur_min:.2f} min")
@@ -384,7 +420,7 @@ else:
 if warning_msg:
     st.warning(warning_msg)
 
-# botón para bajar la ruta en CSV
+# descargar CSV de la ruta dibujada
 if len(ruta_final) >= 2:
     export_df = pd.DataFrame(ruta_final, columns=["lon","lat"])
     st.download_button(
@@ -394,7 +430,7 @@ if len(ruta_final) >= 2:
         mime="text/csv",
     )
 
-# MAPA
+# mapa final
 st.pydeck_chart(
     pdk.Deck(
         layers=layers,
