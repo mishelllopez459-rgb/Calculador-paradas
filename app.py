@@ -7,7 +7,7 @@ import streamlit as st
 
 # ---------------- UI / CONFIG ----------------
 st.set_page_config(page_title="Rutas San Marcos", layout="wide")
-st.title("🚌 Calculador de paradas — San Marcos (modo grafo + OSRM)")
+st.title("🚌 Calculador de paradas y ruta óptima — San Marcos")
 
 # ---------------- CARGA DE DATOS ----------------
 # nodos.csv -> columnas esperadas: id, nombre, lat, lon
@@ -267,18 +267,23 @@ with st.sidebar:
 
     def editor_de_coords(etiqueta, nombre_sel):
         fila_sel = nodos.loc[nodos["nombre"] == nombre_sel].iloc[0]
+
+        # keys dinámicas para que se actualicen cuando cambie la selección
+        key_lat = f"lat_{etiqueta}_{nombre_sel}"
+        key_lon = f"lon_{etiqueta}_{nombre_sel}"
+
         col1, col2 = st.columns(2)
         with col1:
             lat_txt = st.text_input(
                 f"Lat ({etiqueta})",
                 value="" if pd.isna(fila_sel["lat"]) else str(fila_sel["lat"]),
-                key=f"lat_{etiqueta}",
+                key=key_lat,
             )
         with col2:
             lon_txt = st.text_input(
                 f"Lon ({etiqueta})",
                 value="" if pd.isna(fila_sel["lon"]) else str(fila_sel["lon"]),
-                key=f"lon_{etiqueta}",
+                key=key_lon,
             )
         if st.button(f"Guardar coords de {etiqueta}"):
             try:
@@ -342,7 +347,7 @@ if tiene_coords(fila_o) and tiene_coords(fila_d):
     # Fallback: línea recta + tiempo estimado por velocidad 30 km/h
     if ruta_path_lonlat is None:
         dist_km = haversine_km(o_lat, o_lon, d_lat, d_lon)
-        vel_kmh = 30.0
+        vel_kmh = 30.0  # puedes tunear esto
         dur_min = (dist_km / vel_kmh) * 60.0
         ruta_path_lonlat = [[o_lon, o_lat], [d_lon, d_lat]]
 
@@ -351,12 +356,26 @@ if tiene_coords(fila_o) and tiene_coords(fila_d):
         layers.append(ruta_layer)
         all_coords_for_view.extend(ruta_path_lonlat)
 
-# ---------------- VIEWSTATE (ZOOOOM) ----------------
+# ---------------- VIEWSTATE (ZOOM AUTO) ----------------
 if all_coords_for_view:
     view_state = fit_view_from_lonlat(all_coords_for_view, extra_zoom_out=0.4)
 else:
     # fallback si no hay nada con coords
     view_state = pdk.ViewState(latitude=14.965, longitude=-91.79, zoom=13, pitch=0, bearing=0)
+
+# ---------------- MÉTRICAS PARA EL RESUMEN ----------------
+# esto simula lo que mostrabas en la segunda imagen
+criterio_texto = "⏱ tiempo mín"
+grafo_texto = "No dirigido"
+
+if dur_min is not None:
+    costo_total_txt = f"{dur_min:.2f} min"
+else:
+    costo_total_txt = "—"
+
+# por ahora solo contamos origen y destino como paradas
+paradas_totales = 2
+paradas_intermedias = max(0, paradas_totales - 2)
 
 # ---------------- LAYOUT PRINCIPAL ----------------
 col1, col2 = st.columns([1, 2])
@@ -366,13 +385,22 @@ with col1:
 
     st.markdown(f"**Origen:** {origen_nombre}")
     st.markdown(f"**Destino:** {destino_nombre}")
+    st.markdown(f"**Criterio:** {criterio_texto}")
+    st.markdown(f"**Grafo:** {grafo_texto}")
+    st.markdown(f"**Paradas (incluye origen y destino):** {paradas_totales}")
+    st.markdown(f"**Paradas intermedias:** {paradas_intermedias}")
 
-    if dist_km is not None and dur_min is not None:
+    if dist_km is not None:
         st.markdown(f"**Distancia aprox.:** {dist_km:.2f} km")
-        st.markdown(f"**Tiempo aprox.:** {dur_min:.1f} min")
     else:
         st.markdown("**Distancia aprox.:** —")
+
+    if dur_min is not None:
+        st.markdown(f"**Tiempo aprox.:** {dur_min:.1f} min")
+    else:
         st.markdown("**Tiempo aprox.:** —")
+
+    st.markdown(f"**Costo total (tiempo mín):** {costo_total_txt}")
 
     if ruta_path_lonlat:
         export_df = pd.DataFrame(ruta_path_lonlat, columns=["lon", "lat"])
