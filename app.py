@@ -124,18 +124,41 @@ def osrm_route(o_lat, o_lon, d_lat, d_lon):
 
 def fit_view_from_lonlat(coords_lonlat: list, extra_zoom_out: float = 0.35):
     """
-    Calcula un ViewState que encuadra todas las coordenadas (lon,lat) usando
-    pdk.data_utils.compute_view y aplica un pequeño padding con 'extra_zoom_out'.
+    Devuelve un pdk.ViewState que encuadra todas las coordenadas (lon,lat).
+    Tolera tanto pydeck viejo (dict) como pydeck nuevo (ViewState).
     """
+    # si no hay coords, centramos San Marcos
     if not coords_lonlat:
-        # fallback: centro aproximado San Marcos
-        return pdk.ViewState(latitude=14.965, longitude=-91.79, zoom=13)
+        return pdk.ViewState(latitude=14.965, longitude=-91.79, zoom=13, pitch=0, bearing=0)
 
     df_bounds = pd.DataFrame(coords_lonlat, columns=["lon", "lat"])
-    view = pdk.data_utils.compute_view(df_bounds[["lon", "lat"]])
-    # alejamos un poquito para no cortar bordes
-    view["zoom"] = max(1, view["zoom"] - extra_zoom_out)
-    return pdk.ViewState(**view, pitch=0, bearing=0)
+    raw_view = pdk.data_utils.compute_view(df_bounds[["lon", "lat"]])
+    # raw_view puede ser dict o pdk.ViewState según la versión de pydeck
+
+    # caso 1: dict
+    if isinstance(raw_view, dict):
+        lat_center = raw_view.get("latitude", 14.965)
+        lon_center = raw_view.get("longitude", -91.79)
+        zoom_val  = raw_view.get("zoom", 13)
+    else:
+        # caso 2: objeto ViewState
+        lat_center = getattr(raw_view, "latitude", 14.965)
+        lon_center = getattr(raw_view, "longitude", -91.79)
+        zoom_val   = getattr(raw_view, "zoom", 13)
+
+    # alejamos un poquito para que no corte los bordes
+    try:
+        zoom_val = max(1, float(zoom_val) - float(extra_zoom_out))
+    except Exception:
+        zoom_val = 13  # fallback seguro
+
+    return pdk.ViewState(
+        latitude=lat_center,
+        longitude=lon_center,
+        zoom=zoom_val,
+        pitch=0,
+        bearing=0,
+    )
 
 def construir_capa_nodos(df_nodos: pd.DataFrame, rgb_color):
     """ScatterplotLayer con todos los nodos que ya tienen lat/lon."""
@@ -167,7 +190,7 @@ def construir_capa_aristas(df_aristas: pd.DataFrame, df_nodos: pd.DataFrame, rgb
     if df_aristas.empty:
         return None, []
 
-    # prepararnos para join rápido por id
+    # preparar índice por id de nodo
     nod_idx = df_nodos.set_index("id")[["lat", "lon"]]
 
     paths = []
@@ -333,7 +356,7 @@ if all_coords_for_view:
     view_state = fit_view_from_lonlat(all_coords_for_view, extra_zoom_out=0.4)
 else:
     # fallback si no hay nada con coords
-    view_state = pdk.ViewState(latitude=14.965, longitude=-91.79, zoom=13)
+    view_state = pdk.ViewState(latitude=14.965, longitude=-91.79, zoom=13, pitch=0, bearing=0)
 
 # ---------------- LAYOUT PRINCIPAL ----------------
 col1, col2 = st.columns([1, 2])
@@ -387,4 +410,3 @@ if not (tiene_coords(fila_o) and tiene_coords(fila_d)):
         "Asigna lat/lon al Origen y al Destino en la barra lateral para ver la ruta.\n"
         "Los nodos y aristas del grafo se muestran igual si ya tienen coordenadas."
     )
-
