@@ -32,24 +32,20 @@ LUGARES_NUEVOS = [
 # ---------------- NORMALIZACIÓN DE NODOS ----------------
 nodos = nodos_raw.copy()
 
-# asegurar columnas base existen antes de tocarlas
+# asegurar columnas base
 for base_col in ["id", "nombre", "lat", "lon"]:
     if base_col not in nodos.columns:
         nodos[base_col] = None
 
-# limpiar strings en columnas clave id/nombre
+# limpiar texto
 for col in ["id", "nombre"]:
     nodos[col] = nodos[col].astype(str).str.strip()
 
-# dejar solo columnas que usamos
+# quedarnos con columnas que usamos
 nodos = nodos[["id", "nombre", "lat", "lon"]]
 
 def asegurar_lugares(df, nombres):
-    """
-    Garantiza que todos los nombres de LUGARES_NUEVOS existan en df.
-    Si falta uno, lo crea con id L# y lat/lon = None.
-    """
-    # asegurar columnas por si acaso
+    # asegurar columnas
     for c in ["id", "nombre", "lat", "lon"]:
         if c not in df.columns:
             df[c] = None
@@ -69,21 +65,23 @@ def asegurar_lugares(df, nombres):
     nuevas = []
     for nm in nombres:
         if nm.lower() not in existentes:
-            nuevas.append(
-                {"id": nuevo_id(), "nombre": nm, "lat": None, "lon": None}
-            )
+            nuevas.append({
+                "id": nuevo_id(),
+                "nombre": nm,
+                "lat": None,
+                "lon": None
+            })
 
     if nuevas:
         df = pd.concat([df, pd.DataFrame(nuevas)], ignore_index=True)
 
-    # normalizar otra vez (strip)
     df["id"]     = df["id"].astype(str).str.strip()
     df["nombre"] = df["nombre"].astype(str).str.strip()
     return df
 
 nodos = asegurar_lugares(nodos, LUGARES_NUEVOS)
 
-# guardamos en sesión (por si más adelante quieres editar coords)
+# mantener nodos en sesión (ediciones futuras)
 if "nodos_mem" not in st.session_state:
     st.session_state.nodos_mem = nodos.copy()
 nodos = st.session_state.nodos_mem
@@ -128,7 +126,7 @@ def fit_view_from_lonlat(coords_lonlat: list, extra_zoom_out: float = 0.35):
     df_bounds = pd.DataFrame(coords_lonlat, columns=["lon","lat"])
     raw_view  = pdk.data_utils.compute_view(df_bounds[["lon","lat"]])
 
-    # pydeck puede devolver dict ó ViewState
+    # pydeck puede dar dict o ViewState
     if isinstance(raw_view, dict):
         lat_center = raw_view.get("latitude", 14.965)
         lon_center = raw_view.get("longitude", -91.79)
@@ -157,7 +155,6 @@ def build_graph_edges(df_aristas: pd.DataFrame):
     Grafo no dirigido: { nodo_id: set(vecinos) }
     """
     g = {}
-    # asegurar columnas
     if "origen" not in df_aristas.columns:
         df_aristas["origen"] = ""
     if "destino" not in df_aristas.columns:
@@ -174,7 +171,7 @@ def build_graph_edges(df_aristas: pd.DataFrame):
 
 def bfs_shortest_path(graph: dict, start: str, goal: str):
     """
-    Camino más corto en saltos (lista de ids). [] si no se puede.
+    Camino más corto en saltos (lista de ids). [] si no hay.
     """
     if not start or not goal or start not in graph or goal not in graph:
         return []
@@ -254,7 +251,6 @@ def capa_nodos(df_nodos, rgb):
 def capa_aristas(df_aristas, df_nodos, rgb, width_px=3):
     if df_aristas.empty:
         return None, []
-    # proteger columnas en df_nodos
     for need in ["id","lat","lon"]:
         if need not in df_nodos.columns:
             df_nodos[need] = None
@@ -312,7 +308,7 @@ def capa_pin(lat, lon, rgb, radius=150):
         pickable=False,
     )
 
-# ---------------- SIDEBAR (YA SIN LAS CAJAS DE COORDS) ----------------
+# ---------------- SIDEBAR ----------------
 with st.sidebar:
     st.header("Parámetros")
 
@@ -349,7 +345,7 @@ else:
     paradas_tot = 2
     paradas_int = 0
 
-# 3. Filas origen/destino (para pins y OSRM)
+# 3. Filas origen/destino (para pins y cálculos)
 if origen_id in set(nodos["id"]):
     fila_o = nodos.loc[nodos["id"] == origen_id].iloc[0]
 else:
@@ -375,39 +371,51 @@ if (
 # 5. Polyline del grafo con coords por parada
 ruta_grafo = ids_a_polyline_lonlat(nodos, path_ids) if path_ids else []
 
-# 6. Distancia / tiempo final
+# 6. Polyline recta O→D como último fallback
+ruta_recta = []
+if tiene_coords(fila_o) and tiene_coords(fila_d):
+    ruta_recta = [
+        [float(fila_o["lon"]), float(fila_o["lat"])],
+        [float(fila_d["lon"]), float(fila_d["lat"])],
+    ]
+
+# ---------------- DISTANCIA / TIEMPO ----------------
 VEL_KMH = 30.0
 dist_km_final = None
 dur_min_final = None
-estimado = False  # para poner "~" si es aproximación
+estimado = False  # para poner "~"
 
+# prioridad:
+#   1. OSRM
+#   2. grafo con coords de cada parada
+#   3. línea recta origen→destino
+#   4. estimación por saltos del grafo sin coords
 if ruta_osrm and dist_km_osrm is not None:
-    # caso ideal: OSRM (ruta real calle)
     dist_km_final = dist_km_osrm
     dur_min_final = dur_min_osrm
     estimado = False
 elif ruta_grafo:
-    # sumamos tramo a tramo usando coords de cada nodo en el camino
     dist_lineal = distancia_km_sobre_polyline(ruta_grafo)
     if dist_lineal is not None:
         dist_km_final = dist_lineal
         dur_min_final = (dist_lineal / VEL_KMH) * 60.0
         estimado = True
-elif tiene_coords(fila_o) and tiene_coords(fila_d):
-    # distancia recta entre origen y destino
-    dist_lineal = haversine_km(
-        float(fila_o["lat"]), float(fila_o["lon"]),
-        float(fila_d["lat"]), float(fila_d["lon"]),
-    )
+elif ruta_recta:
+    dist_lineal = distancia_km_sobre_polyline(ruta_recta)
+    if dist_lineal is None and len(ruta_recta) == 2:
+        # fallback haversine directo por si distancia_km_sobre_polyline devuelve None (no debería)
+        lon1, lat1 = ruta_recta[0]
+        lon2, lat2 = ruta_recta[1]
+        dist_lineal = haversine_km(lat1, lon1, lat2, lon2)
     dist_km_final = dist_lineal
-    dur_min_final = (dist_lineal / VEL_KMH) * 60.0
+    dur_min_final = (dist_lineal / VEL_KMH) * 60.0 if dist_lineal is not None else None
     estimado = True
 else:
-    # último fallback: sin coords, estimar por saltos
+    # sin coords suficientes: estimar por saltos del grafo
     if path_ids and len(path_ids) > 1:
         hops = len(path_ids) - 1
-        dist_km_final = hops * 0.6    # ~0.6 km/salto asumido
-        dur_min_final = hops * 3.0    # ~3 min/salto asumido
+        dist_km_final = hops * 0.6    # ~0.6 km por salto asumido
+        dur_min_final = hops * 3.0    # ~3 min por salto asumido
         estimado = True
 
 # ---------------- CAPAS DE MAPA ----------------
@@ -418,27 +426,34 @@ RGB_PATH  = hex_to_rgb(col_path)
 layers = []
 all_coords = []
 
-# nodos (scatter)
+# nodos
 layer_nodes, nodos_plot = capa_nodos(nodos, RGB_NODES)
 if show_nodes and layer_nodes is not None:
     layers.append(layer_nodes)
     all_coords.extend(nodos_plot[["lng","lat"]].values.tolist())
 
-# aristas del grafo (todas las conexiones)
+# aristas del grafo
 layer_edges, edges_paths = capa_aristas(aristas_raw, nodos, RGB_EDGES, width_px=3)
 if show_edges and layer_edges is not None:
     layers.append(layer_edges)
     for seg in edges_paths:
         all_coords.extend(seg["path"])
 
-# ruta elegida (gorda encima)
-ruta_final_poly = ruta_osrm if ruta_osrm else ruta_grafo
+# ===================== AQUÍ VA LA RUTA FINAL =====================
+# prioridad visual: osrm > grafo > recta
+if ruta_osrm:
+    ruta_final_poly = ruta_osrm
+elif ruta_grafo:
+    ruta_final_poly = ruta_grafo
+else:
+    ruta_final_poly = ruta_recta  # <-- NUEVO fallback directo origen→destino
+
 layer_route = capa_ruta(ruta_final_poly, RGB_PATH, width_px=8)
 if layer_route:
     layers.append(layer_route)
     all_coords.extend(ruta_final_poly)
 
-# pines O/D (solo si tienen coords)
+# pines origen/destino
 if tiene_coords(fila_o):
     layers.append(
         capa_pin(float(fila_o["lat"]), float(fila_o["lon"]), [0,255,0], radius=180)
@@ -451,10 +466,11 @@ if tiene_coords(fila_d):
     )
     all_coords.append([float(fila_d["lon"]), float(fila_d["lat"])])
 
-# vista inicial mapa
+# centrar mapa
 if all_coords:
     view_state = fit_view_from_lonlat(all_coords, extra_zoom_out=0.4)
 else:
+    # ya literalmente no hay ninguna coord en ningún lado
     view_state = pdk.ViewState(latitude=14.965, longitude=-91.79, zoom=13, pitch=0, bearing=0)
 
 # ---------------- TEXTO RESUMEN ----------------
@@ -525,11 +541,5 @@ with col2:
             },
         ),
         use_container_width=True,
-    )
-
-if not ruta_final_poly:
-    st.info(
-        "No se pudo dibujar la ruta en el mapa (faltan coordenadas en alguna parada), "
-        "pero igual se calculó la ruta mínima con el grafo."
     )
 
