@@ -28,7 +28,6 @@ def haversine_km(a_lat, a_lon, b_lat, b_lon):
     lat1, lon1 = radians(a_lat), radians(a_lon)
     lat2, lon2 = radians(b_lat), radians(b_lon)
     dlat = lat2 - lat1
-    dlon = d2 = lon2 - lon1
     dlon = lon2 - lon1
     h_ = sin(dlat/2)**2 + cos(lat1)*cos(lat2)*sin(dlon/2)**2
     return 2 * R * asin(sqrt(h_))
@@ -110,41 +109,6 @@ def get_row_by_name(df: pd.DataFrame, nombre: str):
         return None
     return sel.iloc[0]
 
-# ★ NUEVO: convex hull (envolvente convexa)
-def convex_hull(points_lonlat):
-    """
-    Calcula el contorno exterior (hull) de una nube de puntos [lon, lat]
-    usando el algoritmo de 'monotonic chain'.
-
-    Devuelve lista de puntos [lon, lat] que forman el borde en orden.
-    Si hay menos de 3 puntos, devuelve tal cual.
-    """
-    pts = sorted(points_lonlat)  # ordena por lon, luego lat
-    if len(pts) <= 2:
-        return pts
-
-    def cross(o, a, b):
-        # producto cruzado (OA x OB) para ver giro
-        return (a[0]-o[0])*(b[1]-o[1]) - (a[1]-o[1])*(b[0]-o[0])
-
-    # lower hull
-    lower = []
-    for p in pts:
-        while len(lower) >= 2 and cross(lower[-2], lower[-1], p) <= 0:
-            lower.pop()
-        lower.append(p)
-
-    # upper hull
-    upper = []
-    for p in reversed(pts):
-        while len(upper) >= 2 and cross(upper[-2], upper[-1], p) <= 0:
-            upper.pop()
-        upper.append(p)
-
-    # concatenar pero sin repetir primeros/últimos
-    hull = lower[:-1] + upper[:-1]
-    return hull
-
 # =========================
 # CARGA CSVs
 # =========================
@@ -169,7 +133,7 @@ def cargar_nodos():
 
     df = df[["id", "nombre", "lat", "lon"]]
 
-    # aseguramos estos puntos (aunque vengan sin coords en CSV)
+    # asegurar que estos lugares existan (aunque sin coords en el CSV original)
     LUGARES_NUEVOS = [
         "Parque Central","Catedral","Terminal de Buses","Hospital Regional",
         "Cancha Los Angeles","Cancha Sintetica Golazo","Aeropuerto Nacional",
@@ -307,7 +271,7 @@ layer_nodes = pdk.Layer(
     "ScatterplotLayer",
     data=nodos_plot,
     get_position="[lng, lat]",
-    get_radius=55,                   # ★ CAMBIADO: un pelín más pequeño
+    get_radius=55,                   # tamaño punto
     radius_min_pixels=3,
     get_fill_color=hex_to_rgb(color_nodes),
     get_line_color=[20,20,20],       # borde oscuro fino
@@ -315,7 +279,7 @@ layer_nodes = pdk.Layer(
     pickable=True,
 )
 
-# ----------- Aristas reales (del CSV) en blanco -----------
+# ----------- Capa aristas reales (del CSV) en blanco -----------
 idx_coords = nodos_full.set_index("id")[["lat","lon"]]
 edge_segments = []
 for _, r in aristas_raw.iterrows():
@@ -342,27 +306,26 @@ if edge_segments:
         pickable=False,
     )
 
-# ----------- ★ NUEVO: POLÍGONO ENVOLVENTE (HULL) DE TODOS LOS NODOS -----------
-# Esto dibuja el contorno general alrededor de todos los puntos rosa.
-all_points_lonlat = [
+# ----------- CADENA BLANCA CON *TODOS* LOS NODOS ROSA -----------
+# tomamos todos los nodos con sus coords finales
+sorted_nodes = nodos_full.sort_values(
+    by=["lon", "lat"], ascending=[True, True]
+).reset_index(drop=True)
+
+all_nodes_path = [
     [float(row["lon"]), float(row["lat"])]
-    for _, row in nodos_full.iterrows()
+    for _, row in sorted_nodes.iterrows()
 ]
 
-hull_points = convex_hull(all_points_lonlat)
-
-# cerramos el polígono volviendo al primer punto
-hull_path = hull_points + [hull_points[0]] if len(hull_points) > 2 else hull_points
-
-layer_hull = None
-if len(hull_path) > 1:
-    layer_hull = pdk.Layer(
+layer_allnodes_chain = None
+if len(all_nodes_path) > 1:
+    layer_allnodes_chain = pdk.Layer(
         "PathLayer",
-        data=[{"path": hull_path}],
+        data=[{"path": all_nodes_path}],
         get_path="path",
-        get_width=4,                       # un poquito más grueso pq es el borde principal
+        get_width=4,                      # grosor blanco
         width_scale=8,
-        get_color=hex_to_rgb(color_edges), # mismo blanco
+        get_color=hex_to_rgb(color_edges),  # mismo color_edges (blanco)
         pickable=False,
     )
 
@@ -381,15 +344,15 @@ layer_route = pdk.Layer(
 # VIEWSTATE (ZOOM AUTO)
 # =========================
 all_coords_for_view = []
-# puntos
+# puntos rosa
 all_coords_for_view.extend([[float(x["lng"]), float(x["lat"])] for _, x in nodos_plot.iterrows()])
-# aristas
+# aristas del csv
 for seg in edge_segments:
     all_coords_for_view.extend(seg["path"])
-# ruta azul
+# línea azul
 all_coords_for_view.extend(ruta_final)
-# hull
-all_coords_for_view.extend(hull_path)
+# cadena blanca con todos los nodos
+all_coords_for_view.extend(all_nodes_path)
 
 view_state = fit_view_from_lonlat(all_coords_for_view, extra_zoom_out=0.4)
 
@@ -398,18 +361,18 @@ view_state = fit_view_from_lonlat(all_coords_for_view, extra_zoom_out=0.4)
 # =========================
 layers = []
 
-# Fondo: líneas blancas originales de aristas internas
+# primero las aristas originales
 if layer_edges is not None:
     layers.append(layer_edges)
 
-# Contorno blanco bonito que abraza toda el área
-if layer_hull is not None:
-    layers.append(layer_hull)
+# luego la cadena blanca que une TODOS los puntos rosa
+if layer_allnodes_chain is not None:
+    layers.append(layer_allnodes_chain)
 
-# Puntos rosa encima
+# luego los puntos rosa arriba
 layers.append(layer_nodes)
 
-# Línea azul final arriba de todo
+# y encima de todo la ruta azul
 layers.append(layer_route)
 
 # =========================
@@ -451,10 +414,8 @@ st.pydeck_chart(
             "html": "<b>{origen}</b> → <b>{destino}</b>",
             "style": {"color": "white"},
         },
-        # ★ OPCIONAL: si ya tenés MAPBOX_API_KEY en tu env,
-        # podés desbloquear un estilo oscuro más pro:
+        # si tenés MAPBOX_API_KEY puedes activar un estilo dark bonito:
         # map_style="mapbox://styles/mapbox/dark-v11",
     ),
     use_container_width=True,
 )
-
