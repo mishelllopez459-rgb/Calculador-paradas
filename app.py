@@ -77,13 +77,13 @@ def asegurar_lugares(df, nombres):
         df = pd.concat([df, pd.DataFrame(nuevas)], ignore_index=True)
 
     # normalizar otra vez (strip)
-    df["id"] = df["id"].astype(str).str.strip()
+    df["id"]     = df["id"].astype(str).str.strip()
     df["nombre"] = df["nombre"].astype(str).str.strip()
     return df
 
 nodos = asegurar_lugares(nodos, LUGARES_NUEVOS)
 
-# mantener nodos editables en sesión
+# guardamos en sesión (por si más adelante quieres editar coords)
 if "nodos_mem" not in st.session_state:
     st.session_state.nodos_mem = nodos.copy()
 nodos = st.session_state.nodos_mem
@@ -157,7 +157,7 @@ def build_graph_edges(df_aristas: pd.DataFrame):
     Grafo no dirigido: { nodo_id: set(vecinos) }
     """
     g = {}
-    # aseguramos columnas mínimo
+    # asegurar columnas
     if "origen" not in df_aristas.columns:
         df_aristas["origen"] = ""
     if "destino" not in df_aristas.columns:
@@ -197,16 +197,15 @@ def bfs_shortest_path(graph: dict, start: str, goal: str):
     return []
 
 def nombre_a_id(nodos_df, nombre):
-    match = nodos_df.loc[nodos_df["nombre"] == nombre]
-    if match.empty:
+    m = nodos_df.loc[nodos_df["nombre"] == nombre]
+    if m.empty:
         return None
-    return str(match.iloc[0]["id"])
+    return str(m.iloc[0]["id"])
 
 def ids_a_polyline_lonlat(nodos_df, ids):
     """
-    Devuelve [[lon,lat], ...] siguiendo ids,
-    ignorando nodos sin coords,
-    Si quedan <2 puntos válidos, devuelve [].
+    Devuelve [[lon,lat], ...] siguiendo ids, usando coords si existen.
+    Si no hay al menos 2 puntos con coords => [].
     """
     pts = []
     if "id" not in nodos_df.columns:
@@ -255,7 +254,7 @@ def capa_nodos(df_nodos, rgb):
 def capa_aristas(df_aristas, df_nodos, rgb, width_px=3):
     if df_aristas.empty:
         return None, []
-    # proteger contra nodos sin columna id/lat/lon
+    # proteger columnas en df_nodos
     for need in ["id","lat","lon"]:
         if need not in df_nodos.columns:
             df_nodos[need] = None
@@ -266,12 +265,14 @@ def capa_aristas(df_aristas, df_nodos, rgb, width_px=3):
         a = str(r.get("origen","")).strip()
         b = str(r.get("destino","")).strip()
         if a in idx.index and b in idx.index:
-            la, lo = idx.loc[a, ["lat","lon"]]
+            la, lo  = idx.loc[a, ["lat","lon"]]
             lb, lo2 = idx.loc[b, ["lat","lon"]]
             if pd.notna(la) and pd.notna(lo) and pd.notna(lb) and pd.notna(lo2):
-                segs.append({"path": [[lo,la],[lo2,lb]],
-                             "origen": a,
-                             "destino": b})
+                segs.append({
+                    "path": [[lo,la],[lo2,lb]],
+                    "origen": a,
+                    "destino": b
+                })
     if not segs:
         return None, []
     layer = pdk.Layer(
@@ -311,7 +312,7 @@ def capa_pin(lat, lon, rgb, radius=150):
         pickable=False,
     )
 
-# ---------------- SIDEBAR ----------------
+# ---------------- SIDEBAR (YA SIN LAS CAJAS DE COORDS) ----------------
 with st.sidebar:
     st.header("Parámetros")
 
@@ -326,90 +327,17 @@ with st.sidebar:
     show_nodes = st.toggle("Mostrar nodos del grafo", True)
     show_edges = st.toggle("Mostrar aristas del grafo", True)
 
-    col_nodes = st.color_picker("Color nodos", "#FF5CA8")
-    col_edges = st.color_picker("Color aristas", "#FFC400")
-    col_path  = st.color_picker("Color ruta origen→destino", "#FF5733")
+    col_nodes = st.color_picker("Color nodos", "#FF5CA8")          # rosa
+    col_edges = st.color_picker("Color aristas", "#FFC400")        # amarillo
+    col_path  = st.color_picker("Color ruta origen→destino", "#FF5733")  # naranja/rojo
     usar_osrm = st.toggle("Ruta real por calle (OSRM)", value=True)
 
-    # ---------- COORDENADAS: sincronizar estado con selección ----------
-    st.markdown("---")
-    st.markdown("### Coordenadas y edición")
-
-    def sync_inputs(tipo, nombre_sel):
-        row = nodos.loc[nodos["nombre"] == nombre_sel].iloc[0]
-        lat_val = "" if pd.isna(row["lat"]) else str(row["lat"])
-        lon_val = "" if pd.isna(row["lon"]) else str(row["lon"])
-
-        lat_key  = f"{tipo}_lat_input"
-        lon_key  = f"{tipo}_lon_input"
-        last_key = f"last_{tipo}_nombre"
-
-        # si cambió el nodo seleccionado, refrescamos los inputs visibles
-        if (last_key not in st.session_state) or (st.session_state[last_key] != nombre_sel):
-            st.session_state[lat_key] = lat_val
-            st.session_state[lon_key] = lon_val
-            st.session_state[last_key] = nombre_sel
-
-    sync_inputs("origen", origen_nombre)
-    sync_inputs("destino", destino_nombre)
-
-    st.caption("Origen")
-    c1, c2 = st.columns(2)
-    with c1:
-        st.session_state["origen_lat_input"] = st.text_input(
-            "Lat (Origen)",
-            value=st.session_state["origen_lat_input"],
-            key="origen_lat_input_key",
-        )
-    with c2:
-        st.session_state["origen_lon_input"] = st.text_input(
-            "Lon (Origen)",
-            value=st.session_state["origen_lon_input"],
-            key="origen_lon_input_key",
-        )
-
-    if st.button("💾 Guardar coords Origen"):
-        try:
-            lat = float(str(st.session_state["origen_lat_input"]).replace(",", "."))
-            lon = float(str(st.session_state["origen_lon_input"]).replace(",", "."))
-            st.session_state.nodos_mem.loc[
-                nodos["nombre"] == origen_nombre, ["lat","lon"]
-            ] = [lat, lon]
-            st.success(f"Origen actualizado: ({lat}, {lon})")
-        except ValueError:
-            st.error("Lat/Lon inválidos. Ej: 14.9712  y  -91.7815")
-
-    st.caption("Destino")
-    d1, d2 = st.columns(2)
-    with d1:
-        st.session_state["destino_lat_input"] = st.text_input(
-            "Lat (Destino)",
-            value=st.session_state["destino_lat_input"],
-            key="destino_lat_input_key",
-        )
-    with d2:
-        st.session_state["destino_lon_input"] = st.text_input(
-            "Lon (Destino)",
-            value=st.session_state["destino_lon_input"],
-            key="destino_lon_input_key",
-        )
-
-    if st.button("💾 Guardar coords Destino"):
-        try:
-            lat = float(str(st.session_state["destino_lat_input"]).replace(",", "."))
-            lon = float(str(st.session_state["destino_lon_input"]).replace(",", "."))
-            st.session_state.nodos_mem.loc[
-                nodos["nombre"] == destino_nombre, ["lat","lon"]
-            ] = [lat, lon]
-            st.success(f"Destino actualizado: ({lat}, {lon})")
-        except ValueError:
-            st.error("Lat/Lon inválidos. Ej: 14.9712  y  -91.7815")
-
 # ---------------- RUTA AUTOMÁTICA ----------------
-# IDs origen/destino
+# 1. IDs origen/destino
 origen_id  = nombre_a_id(nodos, origen_nombre)
 destino_id = nombre_a_id(nodos, destino_nombre)
 
+# 2. Grafo y ruta BFS
 graph = build_graph_edges(aristas_raw)
 path_ids = bfs_shortest_path(graph, origen_id, destino_id) if (origen_id and destino_id) else []
 
@@ -421,11 +349,17 @@ else:
     paradas_tot = 2
     paradas_int = 0
 
-# Coordenadas filas origen/destino (para pins y OSRM)
-fila_o = nodos.loc[nodos["id"] == origen_id].iloc[0] if origen_id in set(nodos["id"]) else pd.Series({"lat":None,"lon":None})
-fila_d = nodos.loc[nodos["id"] == destino_id].iloc[0] if destino_id in set(nodos["id"]) else pd.Series({"lat":None,"lon":None})
+# 3. Filas origen/destino (para pins y OSRM)
+if origen_id in set(nodos["id"]):
+    fila_o = nodos.loc[nodos["id"] == origen_id].iloc[0]
+else:
+    fila_o = pd.Series({"lat":None,"lon":None})
+if destino_id in set(nodos["id"]):
+    fila_d = nodos.loc[nodos["id"] == destino_id].iloc[0]
+else:
+    fila_d = pd.Series({"lat":None,"lon":None})
 
-# Ruta OSRM entre origen y destino si hay coords en ambos
+# 4. Ruta OSRM entre origen y destino si hay coords en ambos
 ruta_osrm = None
 dist_km_osrm = None
 dur_min_osrm = None
@@ -438,29 +372,29 @@ if (
         float(fila_d["lat"]), float(fila_d["lon"])
     )
 
-# Polyline del grafo siguiendo path_ids con coords disponibles
+# 5. Polyline del grafo con coords por parada
 ruta_grafo = ids_a_polyline_lonlat(nodos, path_ids) if path_ids else []
 
-# Distancia / tiempo final
+# 6. Distancia / tiempo final
 VEL_KMH = 30.0
 dist_km_final = None
 dur_min_final = None
 estimado = False  # para poner "~" si es aproximación
 
 if ruta_osrm and dist_km_osrm is not None:
-    # 1. mejor caso: OSRM
+    # caso ideal: OSRM (ruta real calle)
     dist_km_final = dist_km_osrm
     dur_min_final = dur_min_osrm
     estimado = False
 elif ruta_grafo:
-    # 2. sumar tramo a tramo del grafo
+    # sumamos tramo a tramo usando coords de cada nodo en el camino
     dist_lineal = distancia_km_sobre_polyline(ruta_grafo)
     if dist_lineal is not None:
         dist_km_final = dist_lineal
         dur_min_final = (dist_lineal / VEL_KMH) * 60.0
         estimado = True
 elif tiene_coords(fila_o) and tiene_coords(fila_d):
-    # 3. distancia recta O->D
+    # distancia recta entre origen y destino
     dist_lineal = haversine_km(
         float(fila_o["lat"]), float(fila_o["lon"]),
         float(fila_d["lat"]), float(fila_d["lon"]),
@@ -469,11 +403,11 @@ elif tiene_coords(fila_o) and tiene_coords(fila_d):
     dur_min_final = (dist_lineal / VEL_KMH) * 60.0
     estimado = True
 else:
-    # 4. sin coords suficientes, fallback por saltos
+    # último fallback: sin coords, estimar por saltos
     if path_ids and len(path_ids) > 1:
         hops = len(path_ids) - 1
-        dist_km_final = hops * 0.6    # ~0.6 km por salto asumida
-        dur_min_final = hops * 3.0    # ~3 min por salto asumida
+        dist_km_final = hops * 0.6    # ~0.6 km/salto asumido
+        dur_min_final = hops * 3.0    # ~3 min/salto asumido
         estimado = True
 
 # ---------------- CAPAS DE MAPA ----------------
@@ -484,32 +418,33 @@ RGB_PATH  = hex_to_rgb(col_path)
 layers = []
 all_coords = []
 
-# nodos (rosados)
+# nodos (scatter)
 layer_nodes, nodos_plot = capa_nodos(nodos, RGB_NODES)
 if show_nodes and layer_nodes is not None:
     layers.append(layer_nodes)
     all_coords.extend(nodos_plot[["lng","lat"]].values.tolist())
 
-# aristas del grafo (amarillas finas)
+# aristas del grafo (todas las conexiones)
 layer_edges, edges_paths = capa_aristas(aristas_raw, nodos, RGB_EDGES, width_px=3)
 if show_edges and layer_edges is not None:
     layers.append(layer_edges)
     for seg in edges_paths:
         all_coords.extend(seg["path"])
 
-# ruta elegida (naranja gordo)
+# ruta elegida (gorda encima)
 ruta_final_poly = ruta_osrm if ruta_osrm else ruta_grafo
 layer_route = capa_ruta(ruta_final_poly, RGB_PATH, width_px=8)
 if layer_route:
     layers.append(layer_route)
     all_coords.extend(ruta_final_poly)
 
-# pines origen/destino (verde/rojo)
+# pines O/D (solo si tienen coords)
 if tiene_coords(fila_o):
     layers.append(
         capa_pin(float(fila_o["lat"]), float(fila_o["lon"]), [0,255,0], radius=180)
     )
     all_coords.append([float(fila_o["lon"]), float(fila_o["lat"])])
+
 if tiene_coords(fila_d):
     layers.append(
         capa_pin(float(fila_d["lat"]), float(fila_d["lon"]), [255,0,0], radius=180)
@@ -597,3 +532,4 @@ if not ruta_final_poly:
         "No se pudo dibujar la ruta en el mapa (faltan coordenadas en alguna parada), "
         "pero igual se calculó la ruta mínima con el grafo."
     )
+
