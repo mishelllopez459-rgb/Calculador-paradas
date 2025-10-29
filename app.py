@@ -28,6 +28,7 @@ def haversine_km(a_lat, a_lon, b_lat, b_lon):
     lat1, lon1 = radians(a_lat), radians(a_lon)
     lat2, lon2 = radians(b_lat), radians(b_lon)
     dlat = lat2 - lat1
+    dlon = d2 = lon2 - lon1
     dlon = lon2 - lon1
     h_ = sin(dlat/2)**2 + cos(lat1)*cos(lat2)*sin(dlon/2)**2
     return 2 * R * asin(sqrt(h_))
@@ -70,8 +71,8 @@ def fit_view_from_lonlat(coords_lonlat, extra_zoom_out=0.4):
 
 def jitter_from_name(name: str):
     """
-    Generamos un pequeño 'desplazamiento' único por nombre
-    para que cada parada sin coords tenga una ubicación distinta cerca del centro.
+    Si un nodo no trae lat/lon en el CSV, le damos una ubicación cerca del centro.
+    Así todos tienen coordenadas y la ruta siempre se puede dibujar.
     """
     if name is None:
         name = "X"
@@ -80,7 +81,7 @@ def jitter_from_name(name: str):
     off_lat_raw = (h % 200) - 100         # -100 .. 99
     off_lon_raw = ((h // 200) % 200) - 100
 
-    off_lat = off_lat_raw * 0.00005       # ±0.005 grados aprox
+    off_lat = off_lat_raw * 0.00005       # ~±0.005 grados
     off_lon = off_lon_raw * 0.00005
 
     return off_lat, off_lon
@@ -109,6 +110,41 @@ def get_row_by_name(df: pd.DataFrame, nombre: str):
         return None
     return sel.iloc[0]
 
+# ★ NUEVO: convex hull (envolvente convexa)
+def convex_hull(points_lonlat):
+    """
+    Calcula el contorno exterior (hull) de una nube de puntos [lon, lat]
+    usando el algoritmo de 'monotonic chain'.
+
+    Devuelve lista de puntos [lon, lat] que forman el borde en orden.
+    Si hay menos de 3 puntos, devuelve tal cual.
+    """
+    pts = sorted(points_lonlat)  # ordena por lon, luego lat
+    if len(pts) <= 2:
+        return pts
+
+    def cross(o, a, b):
+        # producto cruzado (OA x OB) para ver giro
+        return (a[0]-o[0])*(b[1]-o[1]) - (a[1]-o[1])*(b[0]-o[0])
+
+    # lower hull
+    lower = []
+    for p in pts:
+        while len(lower) >= 2 and cross(lower[-2], lower[-1], p) <= 0:
+            lower.pop()
+        lower.append(p)
+
+    # upper hull
+    upper = []
+    for p in reversed(pts):
+        while len(upper) >= 2 and cross(upper[-2], upper[-1], p) <= 0:
+            upper.pop()
+        upper.append(p)
+
+    # concatenar pero sin repetir primeros/últimos
+    hull = lower[:-1] + upper[:-1]
+    return hull
+
 # =========================
 # CARGA CSVs
 # =========================
@@ -133,7 +169,7 @@ def cargar_nodos():
 
     df = df[["id", "nombre", "lat", "lon"]]
 
-    # asegurar que estos lugares existan (aunque sin coords en el CSV original)
+    # aseguramos estos puntos (aunque vengan sin coords en CSV)
     LUGARES_NUEVOS = [
         "Parque Central","Catedral","Terminal de Buses","Hospital Regional",
         "Cancha Los Angeles","Cancha Sintetica Golazo","Aeropuerto Nacional",
@@ -235,7 +271,7 @@ with st.sidebar:
     color_edges = st.color_picker("Red general (aristas)", "#FFFFFF", key="col_edges")
     color_path  = st.color_picker("Ruta seleccionada", "#00B2FF", key="col_path")
 
-    st.button("Calcular ruta")  # decorativo, el cálculo corre solo
+    st.button("Calcular ruta")
 
 # =========================
 # COMPLETAMOS COORDENADAS PARA *TODOS* LOS NODOS
@@ -249,13 +285,13 @@ fila_d = get_row_by_name(nodos_full, destino_nombre)
 o_lat, o_lon = float(fila_o["lat"]), float(fila_o["lon"])
 d_lat, d_lon = float(fila_d["lat"]), float(fila_d["lon"])
 
-# Línea azul simple origen -> destino
+# línea azul simple origen -> destino
 ruta_final = [
     [o_lon, o_lat],
     [d_lon, d_lat],
 ]
 
-# distancia y tiempo aprox
+# distancia / tiempo
 dist_km = haversine_km(o_lat, o_lon, d_lat, d_lon)
 dur_min = (dist_km / VEL_KMH) * 60.0 if dist_km > 0 else 0.0
 
@@ -263,7 +299,7 @@ dur_min = (dist_km / VEL_KMH) * 60.0 if dist_km > 0 else 0.0
 # ARMAR CAPAS DEL MAPA
 # =========================
 
-# ----------- Capa nodos (rosa) -----------
+# ----------- Capa nodos (puntos rosa) -----------
 nodos_plot = nodos_full.copy()
 nodos_plot.rename(columns={"lon": "lng"}, inplace=True)
 
@@ -271,15 +307,15 @@ layer_nodes = pdk.Layer(
     "ScatterplotLayer",
     data=nodos_plot,
     get_position="[lng, lat]",
-    get_radius=65,
+    get_radius=55,                   # ★ CAMBIADO: un pelín más pequeño
     radius_min_pixels=3,
     get_fill_color=hex_to_rgb(color_nodes),
-    get_line_color=[30,30,30],
+    get_line_color=[20,20,20],       # borde oscuro fino
     line_width_min_pixels=1,
     pickable=True,
 )
 
-# ----------- Capa aristas reales (aristas.csv) -> líneas blancas existentes -----------
+# ----------- Aristas reales (del CSV) en blanco -----------
 idx_coords = nodos_full.set_index("id")[["lat","lon"]]
 edge_segments = []
 for _, r in aristas_raw.iterrows():
@@ -306,29 +342,31 @@ if edge_segments:
         pickable=False,
     )
 
-# ----------- NUEVO: Cadena que conecta TODOS los nodos en orden -----------
-# Idea: ordenar por lon, luego lat. Eso nos da una "ruta" estable
-# que pasa por todos los puntos rosa para que no queden sueltos.
-sorted_nodes = nodos_full.sort_values(by=["lon", "lat"], ascending=[True, True]).reset_index(drop=True)
-
-all_nodes_path = [
+# ----------- ★ NUEVO: POLÍGONO ENVOLVENTE (HULL) DE TODOS LOS NODOS -----------
+# Esto dibuja el contorno general alrededor de todos los puntos rosa.
+all_points_lonlat = [
     [float(row["lon"]), float(row["lat"])]
-    for _, row in sorted_nodes.iterrows()
+    for _, row in nodos_full.iterrows()
 ]
 
-layer_allnodes_chain = None
-if len(all_nodes_path) > 1:
-    layer_allnodes_chain = pdk.Layer(
+hull_points = convex_hull(all_points_lonlat)
+
+# cerramos el polígono volviendo al primer punto
+hull_path = hull_points + [hull_points[0]] if len(hull_points) > 2 else hull_points
+
+layer_hull = None
+if len(hull_path) > 1:
+    layer_hull = pdk.Layer(
         "PathLayer",
-        data=[{"path": all_nodes_path}],
+        data=[{"path": hull_path}],
         get_path="path",
-        get_width=2,          # más delgado que la ruta azul
+        get_width=4,                       # un poquito más grueso pq es el borde principal
         width_scale=8,
-        get_color=hex_to_rgb(color_edges),  # mismo color que las aristas blancas
+        get_color=hex_to_rgb(color_edges), # mismo blanco
         pickable=False,
     )
 
-# ----------- Capa ruta azul gruesa (origen -> destino) -----------
+# ----------- Ruta azul (origen -> destino) -----------
 layer_route = pdk.Layer(
     "PathLayer",
     data=[{"path": ruta_final}],
@@ -343,27 +381,35 @@ layer_route = pdk.Layer(
 # VIEWSTATE (ZOOM AUTO)
 # =========================
 all_coords_for_view = []
+# puntos
 all_coords_for_view.extend([[float(x["lng"]), float(x["lat"])] for _, x in nodos_plot.iterrows()])
+# aristas
 for seg in edge_segments:
     all_coords_for_view.extend(seg["path"])
+# ruta azul
 all_coords_for_view.extend(ruta_final)
-all_coords_for_view.extend(all_nodes_path)  # NUEVO: usar también la cadena completa
+# hull
+all_coords_for_view.extend(hull_path)
 
 view_state = fit_view_from_lonlat(all_coords_for_view, extra_zoom_out=0.4)
 
 # =========================
-# JUNTAR CAPAS (el orden importa visualmente)
-# nodes abajo de todo no importa, lo que importa es dejar la azul encima
+# JUNTAR CAPAS (orden visual)
 # =========================
 layers = []
-layers.append(layer_nodes)
 
+# Fondo: líneas blancas originales de aristas internas
 if layer_edges is not None:
     layers.append(layer_edges)
 
-if layer_allnodes_chain is not None:
-    layers.append(layer_allnodes_chain)
+# Contorno blanco bonito que abraza toda el área
+if layer_hull is not None:
+    layers.append(layer_hull)
 
+# Puntos rosa encima
+layers.append(layer_nodes)
+
+# Línea azul final arriba de todo
 layers.append(layer_route)
 
 # =========================
@@ -377,7 +423,6 @@ st.markdown(f"**Destino:** {destino_nombre}")
 st.markdown(f"**Criterio:** `{criterio_radio}`")
 st.markdown(f"**Grafo:** {'Dirigido' if dirigido_flag else 'No dirigido'}")
 
-# en este modo siempre son Origen y Destino directos
 st.markdown("**Paradas (incluye origen y destino):** 2")
 st.markdown("**Paradas intermedias:** 0")
 
@@ -388,7 +433,7 @@ else:
     st.markdown(f"**Costo total (distancia_km):** {dist_km:.2f} km")
     st.markdown(f"**Tiempo aprox.:** {dur_min:.2f} min")
 
-# botón CSV con la línea azul actual
+# Export CSV de la ruta azul
 export_df = pd.DataFrame(ruta_final, columns=["lon","lat"])
 st.download_button(
     "📥 Descargar ruta (CSV)",
@@ -397,7 +442,7 @@ st.download_button(
     mime="text/csv",
 )
 
-# mapa
+# Mapa
 st.pydeck_chart(
     pdk.Deck(
         layers=layers,
@@ -406,6 +451,10 @@ st.pydeck_chart(
             "html": "<b>{origen}</b> → <b>{destino}</b>",
             "style": {"color": "white"},
         },
+        # ★ OPCIONAL: si ya tenés MAPBOX_API_KEY en tu env,
+        # podés desbloquear un estilo oscuro más pro:
+        # map_style="mapbox://styles/mapbox/dark-v11",
     ),
     use_container_width=True,
 )
+
