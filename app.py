@@ -3,24 +3,37 @@ import requests
 import pandas as pd
 import pydeck as pdk
 import streamlit as st
-from collections import deque
+from collections import defaultdict
+import heapq
 
-# ---------------- CONFIG ----------------
+# =========================
+# Config / Título
+# =========================
 st.set_page_config(page_title="Rutas San Marcos", layout="wide")
 st.title("🚌 Calculador de paradas y ruta óptima — San Marcos")
 
-# ---------------- CARGA CSV ----------------
-try:
-    nodos_raw = pd.read_csv("nodos.csv")   # columnas: id,nombre,lat,lon
-except Exception:
-    nodos_raw = pd.DataFrame(columns=["id", "nombre", "lat", "lon"])
+# =========================
+# Carga de datos
+# =========================
+def cargar_csv(path, cols_min):
+    try:
+        df = pd.read_csv(path)
+    except Exception:
+        df = pd.DataFrame(columns=cols_min)
+    for c in cols_min:
+        if c not in df.columns:
+            df[c] = None
+    return df
 
-try:
-    aristas_raw = pd.read_csv("aristas.csv")  # columnas: origen,destino,(peso)
-except Exception:
-    aristas_raw = pd.DataFrame(columns=["origen", "destino", "peso"])
+nodos_raw   = cargar_csv("nodos.csv",   ["id", "nombre", "lat", "lon"])
+aristas_raw = cargar_csv("aristas.csv", ["origen", "destino", "peso"])
 
-# ---------------- LUGARES DEFINIDOS ----------------
+# Normalización básica
+for col in ["id", "nombre"]:
+    nodos_raw[col] = nodos_raw[col].astype(str).str.strip()
+nodos = nodos_raw[["id", "nombre", "lat", "lon"]].copy()
+
+# Lista de lugares por si falta alguno
 LUGARES_NUEVOS = [
     "Parque Central","Catedral","Terminal de Buses","Hospital Regional",
     "Cancha Los Angeles","Cancha Sintetica Golazo","Aeropuerto Nacional",
@@ -28,65 +41,37 @@ LUGARES_NUEVOS = [
     "CANICA (Casa de los Niños)","Aldea San Rafael Soche","Pollo Campero",
     "INTECAP San Marcos","Salón Quetzal","SAT San Marcos","Bazar Chino"
 ]
-
-# ---------------- NORMALIZACIÓN DE NODOS ----------------
-nodos = nodos_raw.copy()
-
-# asegurar columnas base
-for base_col in ["id", "nombre", "lat", "lon"]:
-    if base_col not in nodos.columns:
-        nodos[base_col] = None
-
-# limpiar texto
-for col in ["id", "nombre"]:
-    nodos[col] = nodos[col].astype(str).str.strip()
-
-# quedarnos con columnas que usamos
-nodos = nodos[["id", "nombre", "lat", "lon"]]
-
 def asegurar_lugares(df, nombres):
-    # asegurar columnas
-    for c in ["id", "nombre", "lat", "lon"]:
-        if c not in df.columns:
-            df[c] = None
-
     existentes = set(df["nombre"].astype(str).str.lower())
-    usados     = set(df["id"].astype(str))
-
-    def nuevo_id(start=1):
-        i = start
+    usados = set(df["id"].astype(str))
+    def nuevo_id():
+        i = 1
         while True:
-            cand = f"L{i}"
-            if cand not in usados:
-                usados.add(cand)
-                return cand
+            c = f"L{i}"
+            if c not in usados:
+                usados.add(c); return c
             i += 1
-
-    nuevas = []
+    faltantes = []
     for nm in nombres:
         if nm.lower() not in existentes:
-            nuevas.append({
-                "id": nuevo_id(),
-                "nombre": nm,
-                "lat": None,
-                "lon": None
-            })
-
-    if nuevas:
-        df = pd.concat([df, pd.DataFrame(nuevas)], ignore_index=True)
-
-    df["id"]     = df["id"].astype(str).str.strip()
+            faltantes.append({"id": nuevo_id(), "nombre": nm, "lat": None, "lon": None})
+    if faltantes:
+        df = pd.concat([df, pd.DataFrame(faltantes)], ignore_index=True)
+    df["id"] = df["id"].astype(str).str.strip()
     df["nombre"] = df["nombre"].astype(str).str.strip()
     return df
-
 nodos = asegurar_lugares(nodos, LUGARES_NUEVOS)
 
-# mantener nodos en sesión (ediciones futuras)
+# Guardar en sesión (por si luego editas coords)
 if "nodos_mem" not in st.session_state:
     st.session_state.nodos_mem = nodos.copy()
 nodos = st.session_state.nodos_mem
 
-# ---------------- HELPERS GEOGRAFÍA ----------------
+# =========================
+# Utilidades geográficas
+# =========================
+VEL_KMH = 30.0  # velocidad media
+
 def hex_to_rgb(h: str):
     h = h.lstrip("#")
     return [int(h[i:i+2], 16) for i in (0,2,4)]
@@ -95,8 +80,7 @@ def haversine_km(a_lat, a_lon, b_lat, b_lon):
     R = 6371.0
     lat1, lon1 = math.radians(a_lat), math.radians(a_lon)
     lat2, lon2 = math.radians(b_lat), math.radians(b_lon)
-    dlat = lat2 - lat1
-    dlon = lon2 - lon1
+    dlat = lat2 - lat1; dlon = lon2 - lon1
     h = math.sin(dlat/2)**2 + math.cos(lat1)*math.cos(lat2)*math.sin(dlon/2)**2
     return 2 * R * math.asin(math.sqrt(h))
 
@@ -112,9 +96,9 @@ def osrm_route(o_lat, o_lon, d_lat, d_lon):
         r = requests.get(url, timeout=12)
         r.raise_for_status()
         data = r.json()
-        coords   = data["routes"][0]["geometry"]["coordinates"]  # [lon, lat]
-        dist_km  = data["routes"][0]["distance"] / 1000.0
-        dur_min  = data["routes"][0]["duration"] / 60.0
+        coords  = data["routes"][0]["geometry"]["coordinates"]  # [lon,lat]
+        dist_km = data["routes"][0]["distance"] / 1000.0
+        dur_min = data["routes"][0]["duration"] / 60.0
         return coords, dist_km, dur_min
     except Exception:
         return None, None, None
@@ -122,11 +106,8 @@ def osrm_route(o_lat, o_lon, d_lat, d_lon):
 def fit_view_from_lonlat(coords_lonlat: list, extra_zoom_out: float = 0.35):
     if not coords_lonlat:
         return pdk.ViewState(latitude=14.965, longitude=-91.79, zoom=13, pitch=0, bearing=0)
-
     df_bounds = pd.DataFrame(coords_lonlat, columns=["lon","lat"])
-    raw_view  = pdk.data_utils.compute_view(df_bounds[["lon","lat"]])
-
-    # pydeck puede dar dict o ViewState
+    raw_view = pdk.data_utils.compute_view(df_bounds[["lon","lat"]])
     if isinstance(raw_view, dict):
         lat_center = raw_view.get("latitude", 14.965)
         lon_center = raw_view.get("longitude", -91.79)
@@ -135,78 +116,111 @@ def fit_view_from_lonlat(coords_lonlat: list, extra_zoom_out: float = 0.35):
         lat_center = getattr(raw_view, "latitude", 14.965)
         lon_center = getattr(raw_view, "longitude", -91.79)
         zoom_val   = getattr(raw_view, "zoom", 13)
-
     try:
         zoom_val = max(1, float(zoom_val) - float(extra_zoom_out))
     except Exception:
         zoom_val = 13
+    return pdk.ViewState(latitude=lat_center, longitude=lon_center, zoom=zoom_val, pitch=0, bearing=0)
 
-    return pdk.ViewState(
-        latitude=lat_center,
-        longitude=lon_center,
-        zoom=zoom_val,
-        pitch=0,
-        bearing=0,
-    )
-
-# ---------------- GRAFO / BFS ----------------
-def build_graph_edges(df_aristas: pd.DataFrame):
+# =========================
+# Construcción de grafo con pesos
+# =========================
+def build_weighted_graph(aristas_df: pd.DataFrame, nodos_df: pd.DataFrame, dirigido: bool):
     """
-    Grafo no dirigido: { nodo_id: set(vecinos) }
+    Devuelve:
+      - graph: dict {u: [(v, costo_tiempo, costo_dist)], ...}
+      - weights: dict {(u,v): {"time": t_min, "dist": d_km}}
+    Si una arista no tiene coords en ambos extremos:
+      - dist ≈ 0.6 km (asumida)
+      - time ≈ 3.0 min (asumida)
+    Si 'peso' está en aristas, lo tomamos como minutos preferentes para 'time'.
     """
-    g = {}
-    if "origen" not in df_aristas.columns:
-        df_aristas["origen"] = ""
-    if "destino" not in df_aristas.columns:
-        df_aristas["destino"] = ""
+    graph = defaultdict(list)
+    weights = {}
+    idx = nodos_df.set_index("id")[["lat","lon"]]
 
-    for _, r in df_aristas.iterrows():
-        a = str(r.get("origen","")).strip()
-        b = str(r.get("destino","")).strip()
-        if not a or not b:
+    def add_edge(u, v, peso):
+        # distancia
+        d_km = None
+        if u in idx.index and v in idx.index:
+            la, lo = idx.loc[u, ["lat","lon"]]
+            lb, lo2 = idx.loc[v, ["lat","lon"]]
+            if pd.notna(la) and pd.notna(lo) and pd.notna(lb) and pd.notna(lo2):
+                d_km = haversine_km(float(la), float(lo), float(lb), float(lo2))
+        if d_km is None:
+            d_km = 0.6  # suposición
+
+        # tiempo
+        if pd.notna(peso):
+            t_min = float(peso)
+        else:
+            t_min = (d_km / VEL_KMH) * 60.0 if d_km is not None else 3.0
+            if t_min == 0:
+                t_min = 3.0
+
+        graph[u].append((v, t_min, d_km))
+        weights[(u, v)] = {"time": t_min, "dist": d_km}
+
+    for _, r in aristas_df.iterrows():
+        u = str(r.get("origen", "")).strip()
+        v = str(r.get("destino", "")).strip()
+        if not u or not v:
             continue
-        g.setdefault(a,set()).add(b)
-        g.setdefault(b,set()).add(a)
-    return g
+        peso = r.get("peso", None)
+        add_edge(u, v, peso)
+        if not dirigido:
+            add_edge(v, u, peso)
 
-def bfs_shortest_path(graph: dict, start: str, goal: str):
+    return graph, weights
+
+# =========================
+# Dijkstra
+# =========================
+def dijkstra(graph, start, goal, use="time"):
     """
-    Camino más corto en saltos (lista de ids). [] si no hay.
+    graph: {u: [(v, t_min, d_km), ...]}
+    use = "time" | "dist"
     """
-    if not start or not goal or start not in graph or goal not in graph:
-        return []
-    if start == goal:
-        return [start]
+    if start not in graph and start != goal:
+        return [], float("inf")
 
-    q = deque([[start]])
-    visit = {start}
-    while q:
-        path = q.popleft()
-        u = path[-1]
-        for v in graph.get(u, []):
-            if v in visit:
-                continue
-            new_path = path + [v]
-            if v == goal:
-                return new_path
-            visit.add(v)
-            q.append(new_path)
-    return []
+    # costo acumulado
+    dist_cost = defaultdict(lambda: float("inf"))
+    prev = {}
+    dist_cost[start] = 0.0
 
-def nombre_a_id(nodos_df, nombre):
-    m = nodos_df.loc[nodos_df["nombre"] == nombre]
-    if m.empty:
-        return None
-    return str(m.iloc[0]["id"])
+    pq = [(0.0, start)]
+    visited = set()
+
+    while pq:
+        cost, u = heapq.heappop(pq)
+        if u in visited:
+            continue
+        visited.add(u)
+
+        if u == goal:
+            break
+
+        for v, t_min, d_km in graph.get(u, []):
+            w = t_min if use == "time" else d_km
+            new_cost = cost + (w if w is not None else float("inf"))
+            if new_cost < dist_cost[v]:
+                dist_cost[v] = new_cost
+                prev[v] = u
+                heapq.heappush(pq, (new_cost, v))
+
+    if goal not in dist_cost or dist_cost[goal] == float("inf"):
+        return [], float("inf")
+
+    # reconstruir ruta
+    path = [goal]
+    while path[-1] != start:
+        path.append(prev[path[-1]])
+    path.reverse()
+    return path, dist_cost[goal]
 
 def ids_a_polyline_lonlat(nodos_df, ids):
-    """
-    Devuelve [[lon,lat], ...] siguiendo ids, usando coords si existen.
-    Si no hay al menos 2 puntos con coords => [].
-    """
     pts = []
-    if "id" not in nodos_df.columns:
-        return []
     idx = nodos_df.set_index("id")
     for nid in ids:
         if nid in idx.index:
@@ -214,30 +228,29 @@ def ids_a_polyline_lonlat(nodos_df, ids):
             lon = idx.loc[nid, "lon"]
             if pd.notna(lat) and pd.notna(lon):
                 pts.append([float(lon), float(lat)])
-    return pts if len(pts) >= 2 else []
+    return pts
 
 def distancia_km_sobre_polyline(poly_lonlat):
-    """
-    Suma haversine sobre todos los segmentos consecutivos.
-    """
     if not poly_lonlat or len(poly_lonlat) < 2:
         return None
-    total = 0.0
+    tot = 0.0
     for i in range(len(poly_lonlat)-1):
         lon1, lat1 = poly_lonlat[i]
         lon2, lat2 = poly_lonlat[i+1]
-        total += haversine_km(lat1, lon1, lat2, lon2)
-    return total
+        tot += haversine_km(lat1, lon1, lat2, lon2)
+    return tot
 
-# ---------------- CAPAS DE MAPA ----------------
+# =========================
+# Capas de mapa
+# =========================
 def capa_nodos(df_nodos, rgb):
-    df_plot = df_nodos.dropna(subset=["lat","lon"]).copy()
-    if df_plot.empty:
+    plot = df_nodos.dropna(subset=["lat","lon"]).copy()
+    if plot.empty:
         return None, pd.DataFrame()
-    df_plot.rename(columns={"lon":"lng"}, inplace=True)
+    plot.rename(columns={"lon":"lng"}, inplace=True)
     layer = pdk.Layer(
         "ScatterplotLayer",
-        data=df_plot,
+        data=plot,
         get_position="[lng, lat]",
         get_radius=65,
         radius_min_pixels=3,
@@ -246,41 +259,33 @@ def capa_nodos(df_nodos, rgb):
         line_width_min_pixels=1,
         pickable=True,
     )
-    return layer, df_plot
+    return layer, plot
 
-def capa_aristas(df_aristas, df_nodos, rgb, width_px=3):
-    if df_aristas.empty:
+def capa_aristas(aristas_df, nodos_df, rgb, width_px=3):
+    if aristas_df.empty:
         return None, []
-    for need in ["id","lat","lon"]:
-        if need not in df_nodos.columns:
-            df_nodos[need] = None
-
-    idx = df_nodos.set_index("id")[["lat","lon"]]
-    segs = []
-    for _, r in df_aristas.iterrows():
-        a = str(r.get("origen","")).strip()
-        b = str(r.get("destino","")).strip()
-        if a in idx.index and b in idx.index:
-            la, lo  = idx.loc[a, ["lat","lon"]]
-            lb, lo2 = idx.loc[b, ["lat","lon"]]
+    idx = nodos_df.set_index("id")[["lat","lon"]]
+    paths = []
+    for _, r in aristas_df.iterrows():
+        u = str(r.get("origen","")).strip()
+        v = str(r.get("destino","")).strip()
+        if u in idx.index and v in idx.index:
+            la, lo  = idx.loc[u, ["lat","lon"]]
+            lb, lo2 = idx.loc[v, ["lat","lon"]]
             if pd.notna(la) and pd.notna(lo) and pd.notna(lb) and pd.notna(lo2):
-                segs.append({
-                    "path": [[lo,la],[lo2,lb]],
-                    "origen": a,
-                    "destino": b
-                })
-    if not segs:
+                paths.append({"path": [[lo,la],[lo2,lb]], "origen": u, "destino": v})
+    if not paths:
         return None, []
     layer = pdk.Layer(
         "PathLayer",
-        data=segs,
+        data=paths,
         get_path="path",
         get_width=width_px,
         width_scale=8,
         get_color=rgb,
         pickable=True,
     )
-    return layer, segs
+    return layer, paths
 
 def capa_ruta(poly_lonlat, rgb, width_px=8):
     if not poly_lonlat:
@@ -295,130 +300,78 @@ def capa_ruta(poly_lonlat, rgb, width_px=8):
         pickable=False,
     )
 
-def capa_pin(lat, lon, rgb, radius=150):
-    return pdk.Layer(
-        "ScatterplotLayer",
-        data=[{"lat":lat,"lng":lon}],
-        get_position="[lng, lat]",
-        get_radius=radius,
-        radius_min_pixels=5,
-        get_fill_color=rgb,
-        get_line_color=[20,20,20],
-        line_width_min_pixels=1,
-        pickable=False,
-    )
-
-# ---------------- SIDEBAR ----------------
+# =========================
+# Sidebar (como en tus screenshots)
+# =========================
 with st.sidebar:
-    st.header("Parámetros")
-
+    st.checkbox("Tramos unidireccionales (grafo dirigido)", value=False, key="dirigido")
     origen_nombre = st.selectbox("Origen", sorted(nodos["nombre"]))
-    destino_nombre = st.selectbox(
-        "Destino",
-        sorted(nodos["nombre"]),
-        index=1 if len(nodos["nombre"]) > 1 else 0,
-    )
-
-    st.markdown("### Visualización")
-    show_nodes = st.toggle("Mostrar nodos del grafo", True)
-    show_edges = st.toggle("Mostrar aristas del grafo", True)
-
-    col_nodes = st.color_picker("Color nodos", "#FF5CA8")          # rosa
-    col_edges = st.color_picker("Color aristas", "#FFC400")        # amarillo
-    col_path  = st.color_picker("Color ruta origen→destino", "#FF5733")  # naranja/rojo
+    destino_nombre = st.selectbox("Destino", sorted(nodos["nombre"]), index=1 if len(nodos)>1 else 0)
+    criterio = st.radio("Optimizar por", ["tiempo_min", "distancia_km"], index=0)
+    st.markdown("### Colores")
+    col_nodes = st.color_picker("Nodos", "#FF5CA8")
+    col_edges = st.color_picker("Aristas", "#FFFFFF")
+    col_path  = st.color_picker("Ruta seleccionada", "#2F80ED")
     usar_osrm = st.toggle("Ruta real por calle (OSRM)", value=True)
+    st.button("Calcular ruta")  # la app recalcula siempre; el botón es puramente de UI
 
-# ---------------- RUTA AUTOMÁTICA ----------------
-# 1. IDs origen/destino
-origen_id  = nombre_a_id(nodos, origen_nombre)
-destino_id = nombre_a_id(nodos, destino_nombre)
+# =========================
+# Resolver ruta
+# =========================
+# ids origen/destino
+def nombre_a_id(nodos_df, nombre):
+    m = nodos_df.loc[nodos_df["nombre"] == nombre]
+    if m.empty: return None
+    return str(m.iloc[0]["id"])
 
-# 2. Grafo y ruta BFS
-graph = build_graph_edges(aristas_raw)
-path_ids = bfs_shortest_path(graph, origen_id, destino_id) if (origen_id and destino_id) else []
+o_id = nombre_a_id(nodos, origen_nombre)
+d_id = nombre_a_id(nodos, destino_nombre)
 
-# Paradas
-if path_ids:
-    paradas_tot = len(path_ids)
-    paradas_int = max(0, paradas_tot - 2)
-else:
-    paradas_tot = 2
-    paradas_int = 0
+# grafo con pesos
+graph, weights = build_weighted_graph(aristas_raw, nodos, dirigido=st.session_state.dirigido)
 
-# 3. Filas origen/destino (para pins y cálculos)
-if origen_id in set(nodos["id"]):
-    fila_o = nodos.loc[nodos["id"] == origen_id].iloc[0]
-else:
-    fila_o = pd.Series({"lat":None,"lon":None})
-if destino_id in set(nodos["id"]):
-    fila_d = nodos.loc[nodos["id"] == destino_id].iloc[0]
-else:
-    fila_d = pd.Series({"lat":None,"lon":None})
+# dijkstra según criterio
+use = "time" if criterio == "tiempo_min" else "dist"
+path_ids, costo = dijkstra(graph, o_id, d_id, use=use)
 
-# 4. Ruta OSRM entre origen y destino si hay coords en ambos
+# totales reales (ambos) sumando pesos del camino
+total_time = 0.0
+total_dist = 0.0
+for i in range(len(path_ids)-1):
+    u, v = path_ids[i], path_ids[i+1]
+    w = weights.get((u, v), {"time": 3.0, "dist": 0.6})
+    total_time += w["time"]
+    total_dist += w["dist"]
+
+# polilínea a dibujar (prioridad: OSRM > polilínea por paradas > recta)
 ruta_osrm = None
-dist_km_osrm = None
-dur_min_osrm = None
-if (
-    origen_id and destino_id and
-    tiene_coords(fila_o) and tiene_coords(fila_d) and usar_osrm
-):
-    ruta_osrm, dist_km_osrm, dur_min_osrm = osrm_route(
-        float(fila_o["lat"]), float(fila_o["lon"]),
-        float(fila_d["lat"]), float(fila_d["lon"])
-    )
+dist_osrm = dur_osrm = None
+fila_o = nodos.loc[nodos["id"] == o_id].iloc[0] if o_id in set(nodos["id"]) else pd.Series({"lat":None,"lon":None})
+fila_d = nodos.loc[nodos["id"] == d_id].iloc[0] if d_id in set(nodos["id"]) else pd.Series({"lat":None,"lon":None})
+if usar_osrm and tiene_coords(fila_o) and tiene_coords(fila_d):
+    ruta_osrm, dist_osrm, dur_osrm = osrm_route(float(fila_o["lat"]), float(fila_o["lon"]), float(fila_d["lat"]), float(fila_d["lon"]))
 
-# 5. Polyline del grafo con coords por parada
-ruta_grafo = ids_a_polyline_lonlat(nodos, path_ids) if path_ids else []
-
-# 6. Polyline recta O→D como último fallback
+ruta_grafo = ids_a_polyline_lonlat(nodos, path_ids)
 ruta_recta = []
 if tiene_coords(fila_o) and tiene_coords(fila_d):
-    ruta_recta = [
-        [float(fila_o["lon"]), float(fila_o["lat"])],
-        [float(fila_d["lon"]), float(fila_d["lat"])],
-    ]
+    ruta_recta = [[float(fila_o["lon"]), float(fila_o["lat"])],
+                  [float(fila_d["lon"]), float(fila_d["lat"])]]
 
-# ---------------- DISTANCIA / TIEMPO ----------------
-VEL_KMH = 30.0
-dist_km_final = None
-dur_min_final = None
-estimado = False  # para poner "~"
-
-# prioridad:
-#   1. OSRM
-#   2. grafo con coords de cada parada
-#   3. línea recta origen→destino
-#   4. estimación por saltos del grafo sin coords
-if ruta_osrm and dist_km_osrm is not None:
-    dist_km_final = dist_km_osrm
-    dur_min_final = dur_min_osrm
-    estimado = False
-elif ruta_grafo:
-    dist_lineal = distancia_km_sobre_polyline(ruta_grafo)
-    if dist_lineal is not None:
-        dist_km_final = dist_lineal
-        dur_min_final = (dist_lineal / VEL_KMH) * 60.0
-        estimado = True
-elif ruta_recta:
-    dist_lineal = distancia_km_sobre_polyline(ruta_recta)
-    if dist_lineal is None and len(ruta_recta) == 2:
-        # fallback haversine directo por si distancia_km_sobre_polyline devuelve None (no debería)
-        lon1, lat1 = ruta_recta[0]
-        lon2, lat2 = ruta_recta[1]
-        dist_lineal = haversine_km(lat1, lon1, lat2, lon2)
-    dist_km_final = dist_lineal
-    dur_min_final = (dist_lineal / VEL_KMH) * 60.0 if dist_lineal is not None else None
-    estimado = True
+if ruta_osrm:
+    ruta_final = ruta_osrm
+elif ruta_grafo and len(ruta_grafo) >= 2:
+    ruta_final = ruta_grafo
 else:
-    # sin coords suficientes: estimar por saltos del grafo
-    if path_ids and len(path_ids) > 1:
-        hops = len(path_ids) - 1
-        dist_km_final = hops * 0.6    # ~0.6 km por salto asumido
-        dur_min_final = hops * 3.0    # ~3 min por salto asumido
-        estimado = True
+    ruta_final = ruta_recta
 
-# ---------------- CAPAS DE MAPA ----------------
+# si usamos OSRM, preferimos sus totales para mostrar (solo informativo)
+if ruta_osrm and dist_osrm is not None and dur_osrm is not None:
+    total_dist = dist_osrm
+    total_time = dur_osrm
+
+# =========================
+# Capas y mapa
+# =========================
 RGB_NODES = hex_to_rgb(col_nodes)
 RGB_EDGES = hex_to_rgb(col_edges)
 RGB_PATH  = hex_to_rgb(col_path)
@@ -426,93 +379,49 @@ RGB_PATH  = hex_to_rgb(col_path)
 layers = []
 all_coords = []
 
-# nodos
-layer_nodes, nodos_plot = capa_nodos(nodos, RGB_NODES)
-if show_nodes and layer_nodes is not None:
-    layers.append(layer_nodes)
-    all_coords.extend(nodos_plot[["lng","lat"]].values.tolist())
+nodes_layer, nodos_plot = capa_nodos(nodos, RGB_NODES)
+if nodes_layer is not None:
+    layers.append(nodes_layer)
+    all_coords += nodos_plot[["lng","lat"]].values.tolist()
 
-# aristas del grafo
-layer_edges, edges_paths = capa_aristas(aristas_raw, nodos, RGB_EDGES, width_px=3)
-if show_edges and layer_edges is not None:
-    layers.append(layer_edges)
-    for seg in edges_paths:
-        all_coords.extend(seg["path"])
+edges_layer, edges_paths = capa_aristas(aristas_raw, nodos, RGB_EDGES, width_px=3)
+if edges_layer is not None:
+    layers.append(edges_layer)
+    for seg in edges_paths: all_coords += seg["path"]
 
-# ===================== AQUÍ VA LA RUTA FINAL =====================
-# prioridad visual: osrm > grafo > recta
-if ruta_osrm:
-    ruta_final_poly = ruta_osrm
-elif ruta_grafo:
-    ruta_final_poly = ruta_grafo
-else:
-    ruta_final_poly = ruta_recta  # <-- NUEVO fallback directo origen→destino
+route_layer = capa_ruta(ruta_final, RGB_PATH, width_px=8)
+if route_layer is not None:
+    layers.append(route_layer)
+    all_coords += ruta_final
 
-layer_route = capa_ruta(ruta_final_poly, RGB_PATH, width_px=8)
-if layer_route:
-    layers.append(layer_route)
-    all_coords.extend(ruta_final_poly)
+view_state = fit_view_from_lonlat(all_coords, 0.4) if all_coords else pdk.ViewState(latitude=14.965, longitude=-91.79, zoom=13)
 
-# pines origen/destino
-if tiene_coords(fila_o):
-    layers.append(
-        capa_pin(float(fila_o["lat"]), float(fila_o["lon"]), [0,255,0], radius=180)
-    )
-    all_coords.append([float(fila_o["lon"]), float(fila_o["lat"])])
-
-if tiene_coords(fila_d):
-    layers.append(
-        capa_pin(float(fila_d["lat"]), float(fila_d["lon"]), [255,0,0], radius=180)
-    )
-    all_coords.append([float(fila_d["lon"]), float(fila_d["lat"])])
-
-# centrar mapa
-if all_coords:
-    view_state = fit_view_from_lonlat(all_coords, extra_zoom_out=0.4)
-else:
-    # ya literalmente no hay ninguna coord en ningún lado
-    view_state = pdk.ViewState(latitude=14.965, longitude=-91.79, zoom=13, pitch=0, bearing=0)
-
-# ---------------- TEXTO RESUMEN ----------------
-criterio_texto = "⏱ tiempo mín"
-grafo_texto    = "No dirigido"
-
-if dist_km_final is not None:
-    dist_txt = f"{dist_km_final:.2f} km"
-else:
-    dist_txt = "—"
-
-if dur_min_final is not None:
-    if estimado:
-        tiempo_txt = f"~{dur_min_final:.1f} min"
-        costo_txt  = f"~{dur_min_final:.1f} min"
-    else:
-        tiempo_txt = f"{dur_min_final:.1f} min"
-        costo_txt  = f"{dur_min_final:.1f} min"
-else:
-    tiempo_txt = "—"
-    costo_txt  = "—"
-
-# ---------------- LAYOUT ----------------
-col1, col2 = st.columns([1, 2])
-
+# =========================
+# Resumen (igual a tus capturas)
+# =========================
+col1, col2 = st.columns([1,2])
 with col1:
     st.subheader("Resumen")
-
     st.markdown(f"**Origen:** {origen_nombre}")
     st.markdown(f"**Destino:** {destino_nombre}")
-    st.markdown(f"**Criterio:** {criterio_texto}")
-    st.markdown(f"**Grafo:** {grafo_texto}")
+    st.markdown(f"**Criterio:** `{criterio}`")
+    st.markdown(f"**Grafo:** {'Dirigido' if st.session_state.dirigido else 'No dirigido'}")
 
+    paradas_tot = len(path_ids) if path_ids else 2
+    paradas_int = max(0, paradas_tot - 2)
     st.markdown(f"**Paradas (incluye origen y destino):** {paradas_tot}")
     st.markdown(f"**Paradas intermedias:** {paradas_int}")
 
-    st.markdown(f"**Distancia aprox.:** {dist_txt}")
-    st.markdown(f"**Tiempo aprox.:** {tiempo_txt}")
-    st.markdown(f"**Costo total (tiempo mín):** {costo_txt}")
+    # Mostrar costo acorde al criterio
+    if criterio == "tiempo_min":
+        st.markdown(f"**Costo total (tiempo_min):** {total_time:.2f}")
+        st.markdown(f"**Distancia aprox.:** {total_dist:.2f} km")
+    else:
+        st.markdown(f"**Costo total (distancia_km):** {total_dist:.2f}")
+        st.markdown(f"**Tiempo aprox.:** {total_time:.2f} min")
 
-    if ruta_final_poly:
-        export_df = pd.DataFrame(ruta_final_poly, columns=["lon","lat"])
+    if ruta_final:
+        export_df = pd.DataFrame(ruta_final, columns=["lon","lat"])
         st.download_button(
             "📥 Descargar ruta (CSV)",
             data=export_df.to_csv(index=False).encode("utf-8"),
@@ -521,24 +430,15 @@ with col1:
         )
 
     st.markdown("---")
-    st.markdown("**Nodos cargados (con coordenadas):**")
-    st.dataframe(
-        nodos.dropna(subset=["lat","lon"])[["id","nombre","lat","lon"]],
-        use_container_width=True,
-    )
-
-    st.markdown("**Aristas cargadas:**")
-    st.dataframe(aristas_raw, use_container_width=True)
+    st.dataframe(nodos.dropna(subset=["lat","lon"])[["id","nombre","lat","lon"]],
+                 use_container_width=True)
 
 with col2:
     st.pydeck_chart(
         pdk.Deck(
             layers=layers,
             initial_view_state=view_state,
-            tooltip={
-                "html": "<b>{origen}</b> → <b>{destino}</b>",
-                "style": {"color": "white"},
-            },
+            tooltip={"html": "<b>{origen}</b> → <b>{destino}</b>", "style": {"color": "white"}},
         ),
         use_container_width=True,
     )
