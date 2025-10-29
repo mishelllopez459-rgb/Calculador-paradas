@@ -306,26 +306,46 @@ if edge_segments:
         pickable=False,
     )
 
-# ----------- CADENA BLANCA CON *TODOS* LOS NODOS ROSA -----------
-# tomamos todos los nodos con sus coords finales
-sorted_nodes = nodos_full.sort_values(
-    by=["lon", "lat"], ascending=[True, True]
-).reset_index(drop=True)
-
-all_nodes_path = [
+# ----------- CADENA BLANCA ORDENADA (TODOS LOS PUNTOS ROSA)
+# Mejora visual:
+# 1. Sacamos todos los puntos finales (lon, lat)
+# 2. Calculamos el centroide
+# 3. Ordenamos por ángulo polar alrededor del centro -> forma circular bonita
+points_list = [
     [float(row["lon"]), float(row["lat"])]
-    for _, row in sorted_nodes.iterrows()
+    for _, row in nodos_full.iterrows()
 ]
 
 layer_allnodes_chain = None
-if len(all_nodes_path) > 1:
+all_nodes_path = []
+
+if len(points_list) > 1:
+    # centroide
+    cx = sum(p[0] for p in points_list) / len(points_list)
+    cy = sum(p[1] for p in points_list) / len(points_list)
+
+    # agregamos ángulo
+    pts_with_angle = []
+    for lon, lat in points_list:
+        ang = math.atan2(lat - cy, lon - cx)
+        pts_with_angle.append((ang, lon, lat))
+
+    # ordenar por ángulo (sentido antihorario)
+    pts_with_angle.sort(key=lambda x: x[0])
+
+    # ruta blanca suave que da la vuelta
+    all_nodes_path = [[lon, lat] for (ang, lon, lat) in pts_with_angle]
+    # cerramos la forma para que se vea poligonal continua
+    if len(all_nodes_path) > 2:
+        all_nodes_path.append(all_nodes_path[0])
+
     layer_allnodes_chain = pdk.Layer(
         "PathLayer",
         data=[{"path": all_nodes_path}],
         get_path="path",
-        get_width=4,                      # grosor blanco
+        get_width=4,
         width_scale=8,
-        get_color=hex_to_rgb(color_edges),  # mismo color_edges (blanco)
+        get_color=hex_to_rgb(color_edges),  # blanco
         pickable=False,
     )
 
@@ -351,7 +371,7 @@ for seg in edge_segments:
     all_coords_for_view.extend(seg["path"])
 # línea azul
 all_coords_for_view.extend(ruta_final)
-# cadena blanca con todos los nodos
+# cadena blanca circular
 all_coords_for_view.extend(all_nodes_path)
 
 view_state = fit_view_from_lonlat(all_coords_for_view, extra_zoom_out=0.4)
@@ -361,18 +381,18 @@ view_state = fit_view_from_lonlat(all_coords_for_view, extra_zoom_out=0.4)
 # =========================
 layers = []
 
-# primero las aristas originales
+# primero las aristas originales (las conexiones reales)
 if layer_edges is not None:
     layers.append(layer_edges)
 
-# luego la cadena blanca que une TODOS los puntos rosa
+# luego la cadena blanca ordenada, que dibuja el contorno con TODOS los puntos
 if layer_allnodes_chain is not None:
     layers.append(layer_allnodes_chain)
 
 # luego los puntos rosa arriba
 layers.append(layer_nodes)
 
-# y encima de todo la ruta azul
+# y encima de todo la ruta azul origen→destino
 layers.append(layer_route)
 
 # =========================
@@ -414,7 +434,7 @@ st.pydeck_chart(
             "html": "<b>{origen}</b> → <b>{destino}</b>",
             "style": {"color": "white"},
         },
-        # si tenés MAPBOX_API_KEY puedes activar un estilo dark bonito:
+        # Si querés estilo dark pro y ya tenés MAPBOX_API_KEY configurada en Streamlit:
         # map_style="mapbox://styles/mapbox/dark-v11",
     ),
     use_container_width=True,
