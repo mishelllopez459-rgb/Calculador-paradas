@@ -70,22 +70,17 @@ def fit_view_from_lonlat(coords_lonlat, extra_zoom_out=0.4):
 
 def jitter_from_name(name: str):
     """
-    generamos un pequeño 'desplazamiento' único por nombre,
+    Generamos un pequeño 'desplazamiento' único por nombre
     para que cada parada sin coords tenga una ubicación distinta cerca del centro.
-
-    esto evita:
-    - que todo caiga exactamente en el mismo punto
-    - que la ruta sea invisible porque origen y destino están encima
     """
     if name is None:
         name = "X"
 
-    h = abs(hash(name))  # número grandote estable por nombre
-    # saco dos offsets pequeñitos en grados (~0.0001 ≈ ~11m aprox)
-    off_lat_raw = (h % 200) - 100         # entre -100 y 99
+    h = abs(hash(name))
+    off_lat_raw = (h % 200) - 100         # -100 .. 99
     off_lon_raw = ((h // 200) % 200) - 100
 
-    off_lat = off_lat_raw * 0.00005       # escala: ±0.005 grados máx (~500m)
+    off_lat = off_lat_raw * 0.00005       # ±0.005 grados aprox
     off_lon = off_lon_raw * 0.00005
 
     return off_lat, off_lon
@@ -198,11 +193,9 @@ def cargar_aristas():
 nodos_raw = cargar_nodos()
 aristas_raw = cargar_aristas()
 
-# guardamos nodos en sesión la primera vez
 if "nodos_full" not in st.session_state:
     st.session_state.nodos_full = nodos_raw.copy()
 
-# en cada render trabajamos sobre la versión en sesión
 nodos_session = st.session_state.nodos_full.copy()
 
 # =========================
@@ -245,32 +238,24 @@ with st.sidebar:
     st.button("Calcular ruta")  # decorativo, el cálculo corre solo
 
 # =========================
-# AQUÍ VIENE EL TRUCO IMPORTANTE
-# 1. rellenamos coords faltantes AUTOMÁTICO para TODOS los nodos
+# COMPLETAMOS COORDENADAS PARA *TODOS* LOS NODOS
 # =========================
 nodos_full = fill_missing_coords_for_all_nodes(nodos_session)
-
-# también guardamos de regreso en sesión para que se mantenga estable
 st.session_state.nodos_full = nodos_full.copy()
 
-# agarramos las filas (ahora garantizado que TODAS tienen lat/lon)
 fila_o = get_row_by_name(nodos_full, origen_nombre)
 fila_d = get_row_by_name(nodos_full, destino_nombre)
 
-# =========================
-# CALCULAR LA RUTA ENTRE ORIGEN Y DESTINO
-# SIEMPRE FUNCIONA porque ya TODOS tienen coords
-# =========================
 o_lat, o_lon = float(fila_o["lat"]), float(fila_o["lon"])
 d_lat, d_lon = float(fila_d["lat"]), float(fila_d["lon"])
 
-# línea azul simple origen -> destino
+# Línea azul simple origen -> destino
 ruta_final = [
     [o_lon, o_lat],
     [d_lon, d_lat],
 ]
 
-# distancia y tiempo
+# distancia y tiempo aprox
 dist_km = haversine_km(o_lat, o_lon, d_lat, d_lon)
 dur_min = (dist_km / VEL_KMH) * 60.0 if dist_km > 0 else 0.0
 
@@ -278,7 +263,7 @@ dur_min = (dist_km / VEL_KMH) * 60.0 if dist_km > 0 else 0.0
 # ARMAR CAPAS DEL MAPA
 # =========================
 
-# capa nodos (rosa)
+# ----------- Capa nodos (rosa) -----------
 nodos_plot = nodos_full.copy()
 nodos_plot.rename(columns={"lon": "lng"}, inplace=True)
 
@@ -294,7 +279,7 @@ layer_nodes = pdk.Layer(
     pickable=True,
 )
 
-# capa aristas blancas finas (toda la red)
+# ----------- Capa aristas reales (aristas.csv) -> líneas blancas existentes -----------
 idx_coords = nodos_full.set_index("id")[["lat","lon"]]
 edge_segments = []
 for _, r in aristas_raw.iterrows():
@@ -321,7 +306,29 @@ if edge_segments:
         pickable=False,
     )
 
-# capa ruta azul gruesa
+# ----------- NUEVO: Cadena que conecta TODOS los nodos en orden -----------
+# Idea: ordenar por lon, luego lat. Eso nos da una "ruta" estable
+# que pasa por todos los puntos rosa para que no queden sueltos.
+sorted_nodes = nodos_full.sort_values(by=["lon", "lat"], ascending=[True, True]).reset_index(drop=True)
+
+all_nodes_path = [
+    [float(row["lon"]), float(row["lat"])]
+    for _, row in sorted_nodes.iterrows()
+]
+
+layer_allnodes_chain = None
+if len(all_nodes_path) > 1:
+    layer_allnodes_chain = pdk.Layer(
+        "PathLayer",
+        data=[{"path": all_nodes_path}],
+        get_path="path",
+        get_width=2,          # más delgado que la ruta azul
+        width_scale=8,
+        get_color=hex_to_rgb(color_edges),  # mismo color que las aristas blancas
+        pickable=False,
+    )
+
+# ----------- Capa ruta azul gruesa (origen -> destino) -----------
 layer_route = pdk.Layer(
     "PathLayer",
     data=[{"path": ruta_final}],
@@ -332,20 +339,31 @@ layer_route = pdk.Layer(
     pickable=False,
 )
 
-# view_state (zoom auto)
+# =========================
+# VIEWSTATE (ZOOM AUTO)
+# =========================
 all_coords_for_view = []
 all_coords_for_view.extend([[float(x["lng"]), float(x["lat"])] for _, x in nodos_plot.iterrows()])
 for seg in edge_segments:
     all_coords_for_view.extend(seg["path"])
 all_coords_for_view.extend(ruta_final)
+all_coords_for_view.extend(all_nodes_path)  # NUEVO: usar también la cadena completa
 
 view_state = fit_view_from_lonlat(all_coords_for_view, extra_zoom_out=0.4)
 
-# juntar capas
+# =========================
+# JUNTAR CAPAS (el orden importa visualmente)
+# nodes abajo de todo no importa, lo que importa es dejar la azul encima
+# =========================
 layers = []
 layers.append(layer_nodes)
+
 if layer_edges is not None:
     layers.append(layer_edges)
+
+if layer_allnodes_chain is not None:
+    layers.append(layer_allnodes_chain)
+
 layers.append(layer_route)
 
 # =========================
